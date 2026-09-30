@@ -30,6 +30,7 @@ Agent / MCP Client
   - [3. pethospital_mcp](#3-pethospital_mcp)
 - [环境依赖](#环境依赖)
 - [启动步骤](#启动步骤)
+- [快速验证](#快速验证)
 - [安全提示](#安全提示)
 - [常见问题](#常见问题)
 
@@ -235,7 +236,18 @@ httpx>=0.28
 python-dotenv>=1.0
 ```
 
-已验证可用的组合（实测）：`mcp 2.2.0` + `httpx 0.28.1` + `uvicorn 0.53.0` + `pydantic 2.13.5` + `python-dotenv 1.2.3`。
+已验证可用的组合（两个 venv 实测一致）：
+
+| 包 | 实测版本 |
+| --- | --- |
+| Python | 3.13.7 |
+| `mcp` | 2.2.0 |
+| `httpx` | 0.28.1 |
+| `uvicorn` | 0.53.0 |
+| `pydantic` | 2.13.5 |
+| `python-dotenv` | 1.2.3（仅 `AnythingLLM_mcp`） |
+
+> `mcp` 必须为 **v2.x**。v1.x 不支持 MCP 2026-07-28 的 `server/discover` 与无状态协议核心，照 v1 教程写会走错。
 
 ### AnythingLLM 服务端
 
@@ -435,6 +447,76 @@ notepad .env        # 至少填写 ALLM_API_KEY
 ```
 
 `pet-hospital-mcp` 依赖后端已启动才能正常调用，但后端晚于 MCP Server 启动也可以（调用时才报错）。`AnythingLLM_mcp` 同理。
+
+---
+
+## 快速验证
+
+两个 MCP Server 都实现了 MCP 2026-07-28 的无状态协议核心，可用 `curl` 直接冒烟测试，无需 MCP Client。
+
+**公共请求头**（两者一致）：
+
+```text
+MCP-Protocol-Version: 2026-07-28
+Accept: application/json, text/event-stream
+Content-Type: application/json
+```
+
+### 冒烟测试 `pet-hospital-mcp`（:18080）
+
+```powershell
+# server/discover —— 应返回 supportedVersions:["2026-07-28"]、serverInfo
+curl.exe -s -X POST "http://127.0.0.1:18080/mcp" `
+  -H "MCP-Protocol-Version: 2026-07-28" -H "Mcp-Method: server/discover" `
+  -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" `
+  --data-binary '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
+
+# tools/list —— 应含 list_pets 与 add_pet，且返回 ttlMs / cacheScope
+curl.exe -s -X POST "http://127.0.0.1:18080/mcp" `
+  -H "MCP-Protocol-Version: 2026-07-28" -H "Mcp-Method: tools/list" `
+  -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" `
+  --data-binary '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
+
+# tools/call list_pets —— 应返回 resultType:"complete"
+curl.exe -s -X POST "http://127.0.0.1:18080/mcp" `
+  -H "MCP-Protocol-Version: 2026-07-28" -H "Mcp-Method: tools/call" -H "Mcp-Name: list_pets" `
+  -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" `
+  --data-binary '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_pets","arguments":{"species":"犬","sort_by":"totalCost","order":"desc","page_size":3},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
+
+# GET / DELETE 应返回 405（Allow: POST）
+curl.exe -s -i -X GET "http://127.0.0.1:18080/mcp" -H "MCP-Protocol-Version: 2026-07-28"
+```
+
+### 冒烟测试 `AnythingLLM_mcp`（:8000）
+
+```powershell
+# tools/list —— 应仅含 ask_workspace
+curl.exe -s -X POST "http://127.0.0.1:8000/mcp" `
+  -H "MCP-Protocol-Version: 2026-07-28" -H "Mcp-Method: tools/list" `
+  -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" `
+  --data-binary '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
+
+# tools/call ask_workspace —— 回答内容取决于已上传并向量化的文档
+curl.exe -s -X POST "http://127.0.0.1:8000/mcp" `
+  -H "MCP-Protocol-Version: 2026-07-28" -H "Mcp-Method: tools/call" -H "Mcp-Name: ask_workspace" `
+  -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" `
+  --data-binary '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask_workspace","arguments":{"message":"这个文档讲了什么？","mode":"query"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
+```
+
+### 后端健康检查
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/health          # 宠物医院后端
+Invoke-RestMethod http://127.0.0.1:8080/api/v1/stats     # 经营统计
+Invoke-RestMethod http://127.0.0.1:8080/api/v1/endpoints # 29 个接口清单
+```
+
+### 语法自检
+
+```powershell
+cd pethospital_mcp\pet-hospital-mcp
+.\.venv\Scripts\python.exe -m compileall server.py petapi tools test_client.py test_add_pet.py
+```
 
 ---
 
