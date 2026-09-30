@@ -1,0 +1,47 @@
+# ---- Python 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- Python 缓存与构建产物 ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 环境变量与密钥（严禁提交）----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- AnythingLLM 运行时数据 ----
+storage/
+vectors/
+lancedb/
+AnythingLLM/server/
+*.sqlite
+*.sqlite3
+
+# ---- 宠物医院临时数据库 ----
+data/*.tmp
+pet.db.tmp
+
+# ---- 编辑器 / 操作系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 日志 ----
+*.log
+logs/

@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>AnythingLLM 管理台</title>
+<style>
+body{font-family:sans-serif;max-width:960px;margin:24px auto;padding:0 16px}
+button{padding:6px 12px;margin:2px}
+input{padding:5px 8px;box-sizing:border-box}
+#apiKey{width:320px}
+nav{margin:12px 0;border-bottom:1px solid #ddd;padding-bottom:6px}
+nav a{margin-right:16px;cursor:pointer;text-decoration:none;color:#333;font-weight:bold}
+nav a.sel{color:#06c}
+.cols{display:flex;gap:16px;align-items:flex-start}
+#tree{width:280px;min-height:120px;max-height:520px;overflow:auto;border:1px solid #ddd;padding:6px;font-size:14px}
+#tree ul{list-style:none;padding-left:16px;margin:0}
+#tree a{display:block;cursor:pointer;color:#333;text-decoration:none;padding:2px 4px;border-radius:3px;font-size:13px}
+#tree a:hover{background:#eee}
+#tree a.sel{background:#bfe}
+#doclist{flex:1;border:1px solid #ddd;min-height:120px;max-height:520px;overflow:auto;font-size:14px}
+.item{display:flex;align-items:center;gap:8px;padding:4px 8px;border-bottom:1px solid #eee}
+.item .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item b{font-size:13px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #eee}
+.gray{color:#999}
+#msg{white-space:pre-wrap;background:#f4f4f4;padding:8px;margin-top:12px;font-size:12px;max-height:200px;overflow:auto}
+.toolbar{margin-bottom:8px}
+</style>
+</head>
+<body>
+<h2>AnythingLLM 管理台</h2>
+<p>API Key: <input id="apiKey" type="password" placeholder="粘贴 AnythingLLM Developer API Key" onchange="init()"> <button onclick="init()">加载</button></p>
+<nav>
+  <a class="sel" data-t="up" onclick="tab('up')">上传</a>
+  <a data-t="doc" onclick="tab('doc')">文档</a>
+  <a data-t="ws" onclick="tab('ws')">工作区</a>
+</nav>
+
+<section id="up">
+  <p>选择工作区: <select id="wsTarget"></select></p>
+  <p><input id="file" type="file"></p>
+  <button onclick="upload()">上传并向量化</button>
+</section>
+
+<section id="doc" class="cols" style="display:none">
+  <div>
+    <div class="toolbar"><button onclick="init()">刷新</button></div>
+    <div id="tree"></div>
+  </div>
+  <div id="doclist"><p class="gray">选择左侧文件夹查看文档</p></div>
+</section>
+
+<section id="ws" style="display:none">
+  <div class="toolbar">
+    新工作区: <input id="wsName" placeholder="名称"> <button onclick="createWs()">创建</button>
+  </div>
+  <table><thead><tr><th>名称</th><th>slug</th><th></th></tr></thead><tbody id="wsBody"></tbody></table>
+</section>
+
+<pre id="msg"></pre>
+<script>
+const BASE="http://localhost:3001/api";
+const $=id=>document.getElementById(id);
+let docsRoot=null, selPath=null;
+
+function key(){ return $("apiKey").value.trim(); }
+function esc(s){ return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function msg(s){ $("msg").textContent=typeof s==="string"?s:JSON.stringify(s); }
+
+async function api(path,opt={}){
+  const o={...opt,headers:{...(opt.headers||{}),"Authorization":"Bearer "+key(),"Accept":"application/json"}};
+  const r=await fetch(BASE+path,o);
+  let d=null; try{d=await r.json();}catch(e){}
+  if(!r.ok) throw new Error((d&&d.error)||("HTTP "+r.status));
+  return d;
+}
+
+function tab(name){
+  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("sel",a.dataset.t===name));
+  ["up","doc","ws"].forEach(s=>$(s).style.display=s===name?"":"none");
+}
+
+/* ---------- 文档树 / 文档列表 ---------- */
+async function loadDocs(){
+  const d=await api("/v1/documents");
+  docsRoot=d.localFiles||d.documents||null;
+  if(!docsRoot||docsRoot.type!=="folder") throw new Error("未取到文档树");
+  renderTree();
+  renderList(findFolder(selPath)||docsRoot);
+}
+
+function treeHTML(n){
+  let h="<ul>";
+  (n.items||[]).forEach(it=>{
+    if(it.type!=="folder") return;
+    h+="<li><a data-name='"+esc(it.name)+"'>📁 "+esc(it.name.split("/").pop())+"</a>";
+    if(it.items&&it.items.length) h+=treeHTML(it);
+    h+="</li>";
+  });
+  return h+"</ul>";
+}
+function renderTree(){ $("tree").innerHTML=treeHTML(docsRoot); }
+
+$("tree").onclick=e=>{
+  const a=e.target.closest("a[data-name]"); if(!a) return;
+  renderList(findFolder(a.dataset.name)||docsRoot);
+};
+
+function findFolder(name){
+  if(!docsRoot||!docsRoot.items) return null;
+  function walk(n){
+    if(n.name===name) return n;
+    for(const it of (n.items||[])){
+      if(it.type!=="folder") continue;
+      const f=walk(it); if(f) return f;
+    }
+    return null;
+  }
+  return walk(docsRoot);
+}
+
+function renderList(f){
+  if(!f){ $("doclist").innerHTML="<p class='gray'>空</p>"; return; }
+  selPath=f.name;
+  document.querySelectorAll("#tree a").forEach(a=>a.classList.toggle("sel",a.dataset.name===f.name));
+  const box=$("doclist"); box.innerHTML="";
+  const head=document.createElement("div"); head.className="item";
+  head.innerHTML="<b>📁 "+esc(f.name.split("/").pop())+"</b><span class='gray' style='font-size:12px'>"+esc(f.name)+"</span>";
+  const delF=document.createElement("button"); delF.textContent="删除文件夹"; delF.onclick=()=>deleteFolder(f);
+  head.appendChild(delF); box.appendChild(head);
+  let n=0;
+  (f.items||[]).forEach(it=>{
+    if(it.type!=="file") return;
+    const row=document.createElement("div"); row.className="item";
+    const nm=document.createElement("span"); nm.className="nm";
+    nm.innerHTML="📄 "+esc(it.title||it.name)+(it.cached?" <span class='gray'>(cache)</span>":"");
+    const del=document.createElement("button"); del.textContent="删除"; del.onclick=()=>deleteDoc(it);
+    row.appendChild(nm); row.appendChild(del); box.appendChild(row); n++;
+  });
+  if(!n) box.innerHTML+="<p class='gray'>空文件夹</p>";
+}
+
+async function deleteDoc(it){
+  if(!confirm("删除文档 "+it.title+" ？将同时从所有工作区移除。")) return;
+  await api("/v1/system/remove-documents",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({names:[it.name]})});
+  msg("已删除: "+it.name); await loadDocs();
+}
+async function deleteFolder(f){
+  if(!confirm("删除文件夹 "+f.name+" 及其全部内容？")) return;
+  await api("/v1/document/remove-folder",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:f.name})});
+  msg("已删除文件夹: "+f.name); selPath=null; await loadDocs();
+}
+
+/* ---------- 工作区管理 ---------- */
+async function loadWs(){
+  const d=await api("/v1/workspaces");
+  const list=d.workspaces||[];
+  $("wsBody").innerHTML=list.map(w=>
+    "<tr><td>"+esc(w.name)+"</td><td class='gray'>"+esc(w.slug)+"</td>"+
+    "<td><button onclick='renameWs(\""+esc(w.slug)+"\")'>重命名</button> "+
+    "<button onclick='deleteWs(\""+esc(w.slug)+"\")'>删除</button></td></tr>").join("");
+  $("wsTarget").innerHTML="<option value=''>（不加入工作区）</option>"+
+    list.map(w=>"<option value='"+esc(w.slug)+"'>"+esc(w.name)+"</option>").join("");
+}
+async function createWs(){
+  const nm=$("wsName").value.trim(); if(!nm) return msg("请输入名称");
+  await api("/v1/workspace/new",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})});
+  $("wsName").value=""; msg("已创建"); await loadWs();
+}
+async function renameWs(slug){
+  const nm=prompt("新名称:",slug); if(!nm) return;
+  await api("/v1/workspace/"+encodeURIComponent(slug)+"/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})});
+  msg("已重命名"); await loadWs();
+}
+async function deleteWs(slug){
+  if(!confirm("删除工作区 "+slug+" ？文档不会删除。")) return;
+  await api("/v1/workspace/"+encodeURIComponent(slug),{method:"DELETE"});
+  msg("已删除: "+slug); await loadWs();
+}
+
+/* ---------- 上传 ---------- */
+async function upload(){
+  const f=$("file").files[0]; if(!f) return msg("请选择文件");
+  const fd=new FormData();
+  fd.append("file",f);
+  fd.append("addToWorkspaces",$("wsTarget").value||"");
+  msg("上传中…");
+  const d=await api("/v1/document/upload",{method:"POST",headers:{},body:fd});
+  msg(d); loadDocs();
+}
+
+async function init(){
+  try{
+    await Promise.all([loadDocs(),loadWs()]);
+    msg("加载完成 ✓ "+(docsRoot.name||""));
+  }catch(e){ msg("加载失败: "+e.message); }
+}
+init();
+</script>
+</body>
+</html>
