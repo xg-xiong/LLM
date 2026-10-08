@@ -45,3 +45,4 @@ desktop.ini
 # ---- 日志 ----
 *.log
 logs/
+config.ini
