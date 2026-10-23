@@ -1,0 +1,14 @@
+# 本地配置，含真实 API Key，不提交
+config.ini
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

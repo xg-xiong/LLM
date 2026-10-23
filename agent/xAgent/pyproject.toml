@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xagent"
+version = "0.1.0"
+description = "可插拔界面的 AI Agent：core 业务层 + Textual TUI 适配层"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "textual>=0.80",
+]
+
+[project.scripts]
+xagent = "tui.app:main"
+
+[tool.setuptools]
+packages = ["core", "core.llm", "core.tools", "tui"]
+
+[tool.setuptools.package-data]
+tui = ["styles.tcss"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# 保留仓库统一的 UTF-8 声明；工具参数校验沿用原有 ValueError 语义
+ignore = ["TRY004", "UP009"]
