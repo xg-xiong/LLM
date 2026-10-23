@@ -1,0 +1,109 @@
+%% ============================================================
+%% chat.py 代码架构图（终端 AI 问答 Agent · OpenAI 兼容接口 + function call）
+%% Mermaid 格式，渲染方式：
+%%   - VS Code 安装 "Markdown Preview Mermaid Support" 或 Mermaid 插件
+%%   - 在线预览：https://mermaid.live
+%% ============================================================
+flowchart TD
+
+    subgraph S1["① 启动与初始化 · main()"]
+        A1["__main__ 保护块<br/>捕获 KeyboardInterrupt → 打印 再见"]
+        A2["main()<br/>sys.stdout.reconfigure<br/>utf-8 / errors=replace"]
+        A3["load_config()<br/>configparser 读取同目录 config.ini 的 [llm] 节<br/>encoding=utf-8-sig 兼容 BOM"]
+        A4["取值 + 兜底默认<br/>base_url = http://localhost:11434/v1<br/>model_name = qwen2.5 · temperature = 0.7<br/>api_key 为空只提示，不中断"]
+        A5["messages = [system 消息]<br/>content = SYSTEM_PROMPT"]
+        A1 --> A2 --> A3 --> A4 --> A5
+    end
+
+    subgraph S2["② 交互主循环 · while True"]
+        B1["input 提示 你: 读取一行"]
+        B2{"输入为空"}
+        B3{"以 / 开头"}
+        B4["内置命令<br/>/quit /exit 退出 · /help 帮助<br/>/clear 重建 system 消息 · 其他提示未知命令"]
+        B5["messages.append user 消息"]
+        B6["snapshot = list(messages)<br/>保存本轮历史快照"]
+        B7["messages[:] = snapshot<br/>回滚：丢弃半截 assistant / tool 消息"]
+        B1 --> B2
+        B2 -- 是 --> B1
+        B2 -- 否 --> B3
+        B3 -- 是 --> B4 --> B1
+        B3 -- 否 --> B5 --> B6
+    end
+
+    subgraph S3["③ 单轮对话 · run_turn()"]
+        C1{"轮次 < MAX_TOOL_ROUNDS<br/>上限 8"}
+        C2["chat_once(cfg, messages)"]
+        C3{"result ok"}
+        C4{"存在 tool_calls"}
+        C5["追加 assistant 消息<br/>content + tool_calls"]
+        C6["逐个 dispatch_tool 执行<br/>打印 工具调用 / 工具返回"]
+        C7["追加 role=tool 消息<br/>tool_call_id + 工具输出"]
+        C8["追加 assistant 消息<br/>本轮正常结束"]
+        C9["return False<br/>请求失败或工具轮次过多"]
+        C1 --> C2 --> C3
+        C3 -- 否 --> C9
+        C3 -- 是 --> C4
+        C4 -- 是 --> C5 --> C6 --> C7 --> C1
+        C4 -- 否 --> C8
+    end
+
+    subgraph S4["④ 模型请求 · chat_once()"]
+        D0["拼装 URL 与 headers<br/>base_url + /chat/completions<br/>有 api_key 时加 Bearer 鉴权"]
+        D1["payload<br/>model · messages · temperature<br/>stream=true · tools=TOOLS · tool_choice=auto"]
+        D2["requests.post<br/>timeout=10,120 · stream=True"]
+        D3{"连接成功且 HTTP 200"}
+        D4["错误分类提示<br/>401 Key 无效 · 404 模型不存在<br/>429 或 5xx 限流不可用 · 其他打印详情"]
+        D5["SSE 逐行解析<br/>data: JSON ... data: [DONE]"]
+        D6["delta.content 逐字 stdout 打印并收集"]
+        D7["delta.tool_calls<br/>_merge_tool_call 按 index 合并分片"]
+        D8["非 SSE 兜底<br/>整包 JSON → _parse_message"]
+        D9["返回 ok / content / tool_calls<br/>失败时 ok=False 不抛出"]
+        D0 --> D1 --> D2 --> D3
+        D3 -- 否 --> D4 --> D9
+        D3 -- 是 --> D5 --> D6
+        D5 --> D7
+        D5 --> D8
+        D6 --> D9
+        D7 --> D9
+        D8 --> D9
+    end
+
+    subgraph S5["⑤ 工具层 · function call"]
+        E1["TOOLS 声明<br/>getDate：无参对象 schema"]
+        E2["TOOL_HANDLERS 映射表<br/>工具名 → 本地函数"]
+        E3["dispatch_tool(call)<br/>未知工具、执行异常都转成字符串返回"]
+        E4["get_date()<br/>Windows: cmd /c date /t 加 time /t<br/>其他平台: date"]
+        E5["subprocess.run<br/>capture_output=True · timeout=15"]
+        E6["_decode()<br/>utf-8 → 系统首选编码 → gbk 依次尝试"]
+        E7["返回日期时间文本<br/>或超时 / 执行失败 / 非零退出码说明"]
+        E1 --> E2 --> E3 --> E4 --> E5 --> E6 --> E7
+    end
+
+    subgraph S6["⑥ 常量与配置"]
+        F1["SYSTEM_PROMPT<br/>首行 --- · 正文可多行 · 尾行 ---"]
+        F2["MAX_TOOL_ROUNDS = 8<br/>防工具调用死循环"]
+        F3["config.example.ini<br/>模板：复制为 config.ini 后填 Key"]
+    end
+
+    A5 --> B1
+    B6 --> C1
+    C9 --> B7 --> B1
+    C2 -. 调用 .-> D1
+    D9 -. 返回 .-> C3
+    C6 -. 调用 .-> E3
+    F1 -. 注入 .-> A5
+    F2 -. 限制 .-> C1
+    F3 -. 参照 .-> A3
+
+    classDef entry fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef loop fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef turn fill:#fff8e1,stroke:#ef6c00,color:#e65100
+    classDef req fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef tool fill:#e0f7fa,stroke:#00838f,color:#006064
+    classDef conf fill:#eceff1,stroke:#455a64,color:#263238
+    class A1,A2,A3,A4,A5 entry
+    class B1,B2,B3,B4,B5,B6,B7 loop
+    class C1,C2,C3,C4,C5,C6,C7,C8,C9 turn
+    class D0,D1,D2,D3,D4,D5,D6,D7,D8,D9 req
+    class E1,E2,E3,E4,E5,E6,E7 tool
+    class F1,F2,F3 conf
