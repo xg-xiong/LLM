@@ -32,7 +32,7 @@ from core.events import (
 from core.exceptions import AgentBusyError
 from core.llm.base import ChatClient
 from core.llm.openai_compat import OpenAICompatibleClient
-from core.models import TurnResult
+from core.models import ToolResult, TurnResult
 from core.prompts import MAX_TOOL_ROUNDS, SYSTEM_PROMPT
 from core.tools import ToolRegistry, build_default_registry
 
@@ -49,7 +49,7 @@ class Agent:
     ) -> None:
         self._config = config
         self._client = client or OpenAICompatibleClient(config.llm)
-        self._registry = registry or build_default_registry()
+        self._registry = registry or build_default_registry(config.search)
         self._conversation = Conversation(system_prompt)
         self._max_tool_rounds = max_tool_rounds
         self._turn_lock = threading.Lock()
@@ -121,6 +121,7 @@ class Agent:
         on_event: EventSink | None,
         cancel: CancellationToken | None,
     ) -> TurnResult:
+        failed_tools: dict[tuple[str, str], ToolResult] = {}
         for round_index in range(self._max_tool_rounds):
             if cancel is not None and cancel.cancelled:
                 return TurnResult(ok=False, cancelled=True, error="已取消")
@@ -152,7 +153,7 @@ class Agent:
                 for call in tool_calls:
                     if cancel is not None and cancel.cancelled:
                         return TurnResult(ok=False, cancelled=True, error="已取消")
-                    self._run_tool(round_index, call, on_event)
+                    self._run_tool(round_index, call, on_event, failed_tools)
                 continue
 
             self._conversation.add_assistant(content)
@@ -165,6 +166,7 @@ class Agent:
         round_index: int,
         call: Mapping[str, Any],
         on_event: EventSink | None,
+        failed_tools: dict[tuple[str, str], ToolResult],
     ) -> None:
         fn = call.get("function") or {}
         name = fn.get("name", "") if isinstance(fn, Mapping) else ""
@@ -172,6 +174,17 @@ class Agent:
         raw_args = fn.get("arguments") if isinstance(fn, Mapping) else None
         if not isinstance(raw_args, str):
             raw_args = json.dumps(raw_args or {}, ensure_ascii=False)
+
+        signature = self._tool_signature(name, raw_args)
+        cached = failed_tools.get(signature)
+        if cached is not None:
+            self._conversation.add_tool_result(
+                call_id,
+                f"{cached.output}\n\n"
+                "[系统提示：本轮已执行过完全相同的工具调用且失败，已跳过重复执行。"
+                "请勿再次调用相同工具和参数，请改用其他参数或直接向用户说明失败原因。]",
+            )
+            return
 
         self._emit(
             on_event,
@@ -193,7 +206,22 @@ class Agent:
                 is_error=outcome.is_error,
             ),
         )
+        if outcome.is_error:
+            failed_tools[signature] = outcome
         self._conversation.add_tool_result(call_id, outcome.output)
+
+    @staticmethod
+    def _tool_signature(name: str, raw_args: str) -> tuple[str, str]:
+        try:
+            parsed = json.loads(raw_args)
+        except (TypeError, ValueError):
+            return name, raw_args
+        return name, json.dumps(
+            parsed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _emit(on_event: EventSink | None, event: AgentEvent) -> None:

@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
     "textual>=0.80",
+    "trafilatura>=1.12",
 ]
 
 [project.scripts]

@@ -11,6 +11,9 @@
 - **可取消**：`CancellationToken` 可中断流式 HTTP 读取和工具循环
 - **可回滚**：一轮失败或取消时丢弃半截 `assistant` / `tool` 消息
 - **工具模块化**：工具 = Schema + handler，注册后即可被模型调用
+- **网页正文提取**：`fetchWeb` 调用本地 `curl` 下载 HTML，再用 `trafilatura` 转为 Markdown
+- **网络搜索**：`searchWeb` 调用百度千帆搜索 API，返回实时摘要、标题与参考 URL
+- **本地 CLI 调用**：`Runcli` 使用 `subprocess` 和 `shell=False` 执行本机命令行程序
 - **可扩展**：配置、LLM 客户端、工具、界面均为可替换的独立模块
 
 ## 目录结构
@@ -30,8 +33,10 @@ xAgent/
 │   │   └── openai_compat.py  # OpenAI 兼容流式客户端（requests）
 │   └── tools/
 │       ├── registry.py       # Tool / ToolRegistry / 参数解析
-│       ├── system.py         # 日期、闰年、当前目录
-│       └── filesystem.py     # 目录与文本文件操作
+│       ├── system.py         # 日期、闰年、当前目录、本地 CLI（Runcli）
+│       ├── filesystem.py     # 目录与文本文件操作
+│       ├── web.py            # curl 抓取网页 + trafilatura 提取 Markdown 正文
+│       └── search.py         # 百度千帆搜索 API（searchWeb）
 ├── tui/                      # Textual 适配层
 │   ├── app.py                # App、事件桥接、命令、工作线程
 │   ├── widgets.py            # 对话区控件
@@ -175,6 +180,31 @@ MY_TOOL = Tool(
 
 `ToolRegistry` 会统一处理 JSON 入参解析和异常捕获，工具抛错不会终止会话。
 
+## 内置工具
+
+| 工具 | 说明 |
+| --- | --- |
+| `getDate` / `isLeapYear` / `getCurrentDirectory` | 日期时间、闰年判断、当前目录 |
+| `listDirectory` / `getFileType` / `readTextFile` | 目录与文本文件读取 |
+| `createFile` / `editFile` / `createDirectory` | 文件与目录创建、编辑 |
+| `deleteFile` / `deleteDirectory` / `renameFileOrDirectory` | 删除与重命名 |
+| `fetchWeb` | 用本地 `curl` 获取网页 HTML，并用 `trafilatura` 提取 Markdown 正文 |
+| `searchWeb` | 调用百度千帆搜索 API，返回实时摘要、来源标题和 URL |
+| `Runcli` | 以 `shell=False` 执行本地 CLI，返回 stdout、stderr 和退出码 |
+
+`Runcli` 接收 `command` 与 `args` 列表，通过 `subprocess.run` 以运行 xAgent 的当前用户权限
+执行，不经过 Shell 字符串拼接。默认超时 30 秒，stdout/stderr 各最多保留 10,000 个字符，
+超出时会注明原始长度和截断情况。非零退出码会正常返回给 LLM 判断；未找到程序、权限错误、
+超时等会返回明确错误。该工具不包含命令白名单、黑名单或审批机制，仅用于受控教学实验环境。
+
+`fetchWeb` 要求系统 `PATH` 中存在 `curl`；`trafilatura` 会随 `pip install -e .` 自动安装。
+工具会拒绝非 `http://` / `https://` 地址，并处理下载失败、超时、HTML 解析失败和正文为空的情况。
+
+`searchWeb` 需要在 `config.ini` 的 `[search]` 小节配置 `baidu_qianfan_api_key`。工具会处理
+未配置 Key、鉴权失败、限流、超时、网络错误和空结果，并自动截断超过 API 限制的 query。
+同一轮对话中，完全相同的工具调用如果已经失败，后续重复调用会自动跳过，避免反复弹出相同错误
+和重复等待。
+
 ## 配置
 
 配置优先级：环境变量 > `config.ini` > 默认值。
@@ -185,6 +215,7 @@ MY_TOOL = Tool(
 | `[llm] model_name` | `XAGENT_MODEL` | `qwen2.5` |
 | `[llm] api_key` | `XAGENT_API_KEY` | 空 |
 | `[llm] temperature` | `XAGENT_TEMPERATURE` | `0.7` |
+| `[search] baidu_qianfan_api_key` | `XAGENT_SEARCH_API_KEY` | 空 |
 | 配置文件路径 | `XAGENT_CONFIG` | `xAgent/config.ini` |
 
 ## 与 chat3.py 的对应关系
@@ -200,4 +231,5 @@ MY_TOOL = Tool(
 
 所有原有工具（`getDate`、`isLeapYear`、`getCurrentDirectory`、`listDirectory`、
 `getFileType`、`readTextFile`、`createFile`、`editFile`、`createDirectory`、
-`deleteDirectory`、`deleteFile`、`renameFileOrDirectory`）均已保留。
+`deleteDirectory`、`deleteFile`、`renameFileOrDirectory`）均已保留；另外新增
+`fetchWeb` 用于读取网页正文，`searchWeb` 用于联网搜索，`Runcli` 用于调用本地命令行程序。

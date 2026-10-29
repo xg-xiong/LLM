@@ -6,7 +6,7 @@
 """
 from .agent import Agent
 from .cancellation import CancellationToken
-from .config import AppConfig, LLMConfig
+from .config import AppConfig, LLMConfig, SearchConfig
 from .events import (
     AgentEvent,
     AssistantCompleted,
@@ -33,6 +33,7 @@ __all__ = [
     "CancellationToken",
     "ChatResult",
     "LLMConfig",
+    "SearchConfig",
     "ToolCallFinished",
     "ToolCallStarted",
     "ToolResult",
