@@ -3,8 +3,8 @@
 
 配置来源优先级（高 -> 低）：
 1. 环境变量 XAGENT_BASE_URL / XAGENT_MODEL / XAGENT_API_KEY / XAGENT_TEMPERATURE /
-   XAGENT_SEARCH_API_KEY
-2. config.ini 的 [llm] / [search] 段（路径可由 XAGENT_CONFIG 指定）
+   XAGENT_SEARCH_API_KEY / XAGENT_PROJECT_ROOT
+2. config.ini 的 [llm] / [search] / [agent] 段（路径可由 XAGENT_CONFIG 指定）
 3. 内置默认值
 
 core 只负责解析配置，不打印提示；提示由各 UI 适配层决定。
@@ -46,6 +46,7 @@ class AppConfig:
     llm: LLMConfig
     search: SearchConfig = field(default_factory=SearchConfig)
     source: Path | None = None
+    project_root: Path | None = None
 
     @classmethod
     def load(
@@ -62,6 +63,7 @@ class AppConfig:
         parser.read(str(config_path), encoding="utf-8-sig")
         section = parser["llm"] if parser.has_section("llm") else {}
         search_section = parser["search"] if parser.has_section("search") else {}
+        agent_section = parser["agent"] if parser.has_section("agent") else {}
 
         base_url = _pick(env, "XAGENT_BASE_URL", section, "base_url", "http://localhost:11434/v1")
         model_name = _pick(env, "XAGENT_MODEL", section, "model_name", "qwen2.5")
@@ -74,11 +76,21 @@ class AppConfig:
             "baidu_qianfan_api_key",
             "",
         )
+        project_root_raw = _pick(
+            env,
+            "XAGENT_PROJECT_ROOT",
+            agent_section,
+            "project_root",
+            "",
+        )
 
         try:
             temperature = float(temperature_raw)
         except (TypeError, ValueError):
             temperature = 0.7
+
+        project_root_text = str(project_root_raw).strip()
+        project_root = Path(project_root_text).expanduser() if project_root_text else None
 
         return cls(
             llm=LLMConfig(
@@ -91,6 +103,7 @@ class AppConfig:
                 baidu_qianfan_api_key=str(search_api_key).strip(),
             ),
             source=config_path.resolve(),
+            project_root=project_root,
         )
 
 

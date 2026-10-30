@@ -9,6 +9,7 @@ description = "可插拔界面的 AI Agent：core 业务层 + Textual TUI 适配
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "PyYAML>=6.0",
     "requests>=2.31",
     "textual>=0.80",
     "trafilatura>=1.12",

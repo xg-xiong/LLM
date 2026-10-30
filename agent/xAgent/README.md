@@ -14,6 +14,7 @@
 - **网页正文提取**：`fetchWeb` 调用本地 `curl` 下载 HTML，再用 `trafilatura` 转为 Markdown
 - **网络搜索**：`searchWeb` 调用百度千帆搜索 API，返回实时摘要、标题与参考 URL
 - **本地 CLI 调用**：`Runcli` 使用 `subprocess` 和 `shell=False` 执行本机命令行程序
+- **Agent Skills**：启动时发现 `.agents/skills/*/SKILL.md`，按需通过 `loadSkill` 动态加载
 - **可扩展**：配置、LLM 客户端、工具、界面均为可替换的独立模块
 
 ## 目录结构
@@ -27,7 +28,8 @@ xAgent/
 │   ├── events.py             # UI 无关事件契约
 │   ├── models.py             # ChatResult / ToolResult / TurnResult
 │   ├── cancellation.py       # 线程安全取消令牌
-│   ├── prompts.py            # 系统提示词与轮次上限
+│   ├── prompts.py            # 系统提示词、Skill 注入与轮次上限
+│   ├── skills.py             # Agent Skills 发现与元数据注册
 │   ├── llm/
 │   │   ├── base.py           # ChatClient 端口（Protocol）
 │   │   └── openai_compat.py  # OpenAI 兼容流式客户端（requests）
@@ -36,7 +38,8 @@ xAgent/
 │       ├── system.py         # 日期、闰年、当前目录、本地 CLI（Runcli）
 │       ├── filesystem.py     # 目录与文本文件操作
 │       ├── web.py            # curl 抓取网页 + trafilatura 提取 Markdown 正文
-│       └── search.py         # 百度千帆搜索 API（searchWeb）
+│       ├── search.py         # 百度千帆搜索 API（searchWeb）
+│       └── skills.py         # Agent Skills 加载（loadSkill）
 ├── tui/                      # Textual 适配层
 │   ├── app.py                # App、事件桥接、命令、工作线程
 │   ├── widgets.py            # 对话区控件
@@ -52,7 +55,7 @@ xAgent/
 
 ## 快速开始
 
-需要 Python 3.10+。在 `agent/xAgent` 目录下执行：
+需要 Python 3.10+。先在 `agent/xAgent` 目录安装依赖：
 
 ```powershell
 # 1. 安装依赖（同时安装 xagent 命令）
@@ -61,12 +64,19 @@ python -m pip install -e .
 # 2. 准备配置
 Copy-Item config.example.ini config.ini
 # 编辑 config.ini，填入 base_url / model_name / api_key
+```
 
-# 3. 启动
-python main.py
-# 或
+在 `config.ini` 的 `[agent] project_root` 配置好 Agent Skills 项目根目录后，可以在任意目录启动，
+例如直接从仓库根目录运行：
+
+```powershell
+cd D:\opencode_xg\LLM
+python agent\xAgent\main.py
+# 或安装 xagent 命令后
 xagent
 ```
+
+若未配置 `project_root`，则使用启动时的工作目录，并扫描该目录下的 `.agents/skills`。
 
 界面只显示运行状态，不会展示模型名称、接口地址或 API Key。
 `config.ini` 已被 `.gitignore` 忽略，不会提交真实 Key。
@@ -191,6 +201,7 @@ MY_TOOL = Tool(
 | `fetchWeb` | 用本地 `curl` 获取网页 HTML，并用 `trafilatura` 提取 Markdown 正文 |
 | `searchWeb` | 调用百度千帆搜索 API，返回实时摘要、来源标题和 URL |
 | `Runcli` | 以 `shell=False` 执行本地 CLI，返回 stdout、stderr 和退出码 |
+| `loadSkill` | 按需加载 Agent Skill 的 `SKILL.md` 或 Skill 目录内的附件文件 |
 
 `Runcli` 接收 `command` 与 `args` 列表，通过 `subprocess.run` 以运行 xAgent 的当前用户权限
 执行，不经过 Shell 字符串拼接。默认超时 30 秒，stdout/stderr 各最多保留 10,000 个字符，
@@ -205,6 +216,51 @@ MY_TOOL = Tool(
 同一轮对话中，完全相同的工具调用如果已经失败，后续重复调用会自动跳过，避免反复弹出相同错误
 和重复等待。
 
+## Agent Skills
+
+项目根目录优先级：
+
+1. 环境变量 `XAGENT_PROJECT_ROOT`
+2. `config.ini` 的 `[agent] project_root`
+3. 启动时的工作目录
+
+初始化时扫描：
+
+```text
+<project_root>/.agents/skills/<skill-name>/SKILL.md
+```
+
+例如配置 `project_root = D:\opencode_xg\office` 后，无论从哪个目录启动，扫描的都是
+`D:\opencode_xg\office\.agents\skills`。相对路径按启动时工作目录解析。
+
+每个 `SKILL.md` 必须以 YAML Frontmatter 开头，并包含 `name` 和 `description`：
+
+```markdown
+---
+name: pdf-tools
+description: Extract text and tables from PDF files when the user asks to inspect a PDF.
+---
+
+# PDF Tools
+...
+```
+
+`name` 最多 64 个字符，只能使用小写字母、数字和连字符；`description` 最多 1024 个字符。
+初始化阶段只读取 Frontmatter 元数据，不读取正文。发现的 Skill 会以名称和描述注入 System Prompt，
+正文只有在 LLM 调用 `loadSkill` 时才会进入对话上下文。
+
+`loadSkill` 的行为：
+
+- 只提供 `name`：返回该 Skill 的 `SKILL.md` 全文。
+- 同时提供 `filename`：只返回附件文件，不重复附加 `SKILL.md`。
+- `filename` 支持相对于 Skill 目录、项目根目录和绝对路径；只提供文件名时会在该 Skill 目录内
+  递归查找，若存在多个同名文件则返回候选路径，由 LLM 选择。
+- 所有读取路径都会解析并检查，必须位于指定 Skill 目录内部；越界路径、符号链接逃逸和二进制文件
+  会被拒绝。
+
+缺少必需字段、Frontmatter 损坏、名称非法或重复的 Skill 会被跳过，并记录在
+`SkillRegistry.issues` 中。Skill 可与 `Runcli`、文件工具、`fetchWeb` 等现有工具协同使用。
+
 ## 配置
 
 配置优先级：环境变量 > `config.ini` > 默认值。
@@ -216,6 +272,7 @@ MY_TOOL = Tool(
 | `[llm] api_key` | `XAGENT_API_KEY` | 空 |
 | `[llm] temperature` | `XAGENT_TEMPERATURE` | `0.7` |
 | `[search] baidu_qianfan_api_key` | `XAGENT_SEARCH_API_KEY` | 空 |
+| `[agent] project_root` | `XAGENT_PROJECT_ROOT` | 启动时工作目录 |
 | 配置文件路径 | `XAGENT_CONFIG` | `xAgent/config.ini` |
 
 ## 与 chat3.py 的对应关系
@@ -232,4 +289,5 @@ MY_TOOL = Tool(
 所有原有工具（`getDate`、`isLeapYear`、`getCurrentDirectory`、`listDirectory`、
 `getFileType`、`readTextFile`、`createFile`、`editFile`、`createDirectory`、
 `deleteDirectory`、`deleteFile`、`renameFileOrDirectory`）均已保留；另外新增
-`fetchWeb` 用于读取网页正文，`searchWeb` 用于联网搜索，`Runcli` 用于调用本地命令行程序。
+`fetchWeb` 用于读取网页正文，`searchWeb` 用于联网搜索，`Runcli` 用于调用本地命令行程序，
+`loadSkill` 用于按需加载 Agent Skills。

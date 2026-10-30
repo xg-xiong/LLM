@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import secrets
 from contextlib import suppress
-from pathlib import Path
 from time import perf_counter
 from typing import ClassVar
 
@@ -86,8 +85,12 @@ class XAgentApp(App):
                         )
                         yield Static("模型已隐藏", id="model-meta", markup=False)
                     with HorizontalGroup(id="meta-dir"):
-                        yield Static("工作目录", id="workdir-label", markup=False)
-                        yield Static(str(Path.cwd()), id="workdir", markup=False)
+                        yield Static("项目目录", id="workdir-label", markup=False)
+                        yield Static(
+                            str(self.agent.project_root),
+                            id="workdir",
+                            markup=False,
+                        )
                     yield Static(
                         "Enter 发送   /help 命令   Esc 中断生成   Ctrl+B 侧栏   Ctrl+N 新会话",
                         id="meta-hints",
@@ -132,9 +135,9 @@ class XAgentApp(App):
                         yield Static("接口", classes="side-label", markup=False)
                         yield Static("已隐藏", classes="side-value", markup=False)
                     with HorizontalGroup(classes="side-row"):
-                        yield Static("目录", classes="side-label", markup=False)
+                        yield Static("项目", classes="side-label", markup=False)
                         yield Static(
-                            str(Path.cwd()),
+                            str(self.agent.project_root),
                             classes="side-value side-path",
                             markup=False,
                         )

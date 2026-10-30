@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from core.cancellation import CancellationToken
@@ -33,7 +34,8 @@ from core.exceptions import AgentBusyError
 from core.llm.base import ChatClient
 from core.llm.openai_compat import OpenAICompatibleClient
 from core.models import ToolResult, TurnResult
-from core.prompts import MAX_TOOL_ROUNDS, SYSTEM_PROMPT
+from core.prompts import MAX_TOOL_ROUNDS, SYSTEM_PROMPT, build_system_prompt
+from core.skills import SkillRegistry
 from core.tools import ToolRegistry, build_default_registry
 
 
@@ -46,17 +48,36 @@ class Agent:
         registry: ToolRegistry | None = None,
         system_prompt: str = SYSTEM_PROMPT,
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
+        project_root: str | Path | None = None,
     ) -> None:
         self._config = config
         self._client = client or OpenAICompatibleClient(config.llm)
-        self._registry = registry or build_default_registry(config.search)
-        self._conversation = Conversation(system_prompt)
+        root = project_root if project_root is not None else config.project_root
+        self._project_root = (
+            Path.cwd() if root is None else Path(root)
+        ).expanduser().resolve()
+        self._skills = SkillRegistry.discover(self._project_root)
+        self._system_prompt = build_system_prompt(system_prompt, self._skills.skills)
+        self._registry = registry or build_default_registry(config.search, self._skills)
+        self._conversation = Conversation(self._system_prompt)
         self._max_tool_rounds = max_tool_rounds
         self._turn_lock = threading.Lock()
 
     @property
     def config(self) -> AppConfig:
         return self._config
+
+    @property
+    def project_root(self) -> Path:
+        return self._project_root
+
+    @property
+    def skills(self) -> SkillRegistry:
+        return self._skills
+
+    @property
+    def skill_names(self) -> list[str]:
+        return self._skills.names
 
     @property
     def tool_names(self) -> list[str]:

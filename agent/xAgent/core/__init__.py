@@ -19,6 +19,7 @@ from .events import (
 from .exceptions import AgentBusyError, AgentError
 from .models import ChatResult, ToolResult, TurnResult
 from .prompts import MAX_TOOL_ROUNDS, SYSTEM_PROMPT
+from .skills import Skill, SkillRegistry
 
 __all__ = [
     "MAX_TOOL_ROUNDS",
@@ -34,6 +35,8 @@ __all__ = [
     "ChatResult",
     "LLMConfig",
     "SearchConfig",
+    "Skill",
+    "SkillRegistry",
     "ToolCallFinished",
     "ToolCallStarted",
     "ToolResult",
