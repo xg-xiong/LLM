@@ -8,8 +8,10 @@ from __future__ import annotations
 from contextlib import suppress
 from datetime import datetime
 
+from textual import events
 from textual.containers import HorizontalGroup, VerticalGroup, VerticalScroll
-from textual.widgets import Static
+from textual.message import Message
+from textual.widgets import Static, TextArea
 
 ROLE_LABELS = {
     "user": "",
@@ -34,6 +36,31 @@ class TopBar(HorizontalGroup):
 
     def _update_clock(self) -> None:
         self.query_one("#top-clock", Static).update(datetime.now().strftime("%H:%M:%S"))
+
+
+class PromptArea(TextArea):
+    """多行输入框：Enter 发送，Shift+Enter / Ctrl+J 换行。"""
+
+    class Submitted(Message):
+        def __init__(self, prompt: PromptArea, value: str) -> None:
+            super().__init__()
+            self.prompt = prompt
+            self.value = value
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            value = self.text.strip()
+            if value:
+                self.post_message(self.Submitted(self, value))
+            return
+        if event.key in {"shift+enter", "ctrl+enter", "alt+enter", "ctrl+j"}:
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+        await super()._on_key(event)
 
 
 class ChatLog(VerticalScroll):

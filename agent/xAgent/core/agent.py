@@ -34,9 +34,14 @@ from core.exceptions import AgentBusyError
 from core.llm.base import ChatClient
 from core.llm.openai_compat import OpenAICompatibleClient
 from core.models import ToolResult, TurnResult
-from core.prompts import MAX_TOOL_ROUNDS, SYSTEM_PROMPT, build_system_prompt
+from core.prompts import SYSTEM_PROMPT, build_system_prompt
 from core.skills import SkillRegistry
-from core.tools import ToolRegistry, build_default_registry
+from core.mcp import MCPManager
+from core.tools import (
+    ToolRegistry,
+    build_default_registry,
+    register_mcp_tools,
+)
 
 
 class Agent:
@@ -47,7 +52,7 @@ class Agent:
         client: ChatClient | None = None,
         registry: ToolRegistry | None = None,
         system_prompt: str = SYSTEM_PROMPT,
-        max_tool_rounds: int = MAX_TOOL_ROUNDS,
+        max_tool_rounds: int | None = None,
         project_root: str | Path | None = None,
     ) -> None:
         self._config = config
@@ -59,8 +64,13 @@ class Agent:
         self._skills = SkillRegistry.discover(self._project_root)
         self._system_prompt = build_system_prompt(system_prompt, self._skills.skills)
         self._registry = registry or build_default_registry(config.search, self._skills)
+        self._mcp: MCPManager | None = None
+        if registry is None:
+            self._mcp = register_mcp_tools(self._registry, self._project_root)
         self._conversation = Conversation(self._system_prompt)
-        self._max_tool_rounds = max_tool_rounds
+        self._max_tool_rounds = (
+            config.max_tool_rounds if max_tool_rounds is None else max_tool_rounds
+        )
         self._turn_lock = threading.Lock()
 
     @property
@@ -88,6 +98,14 @@ class Agent:
         return self._registry.catalog
 
     @property
+    def mcp_issues(self) -> list[str]:
+        return self._mcp.issues if self._mcp is not None else []
+
+    @property
+    def mcp_server_names(self) -> list[str]:
+        return self._mcp.server_names if self._mcp is not None else []
+
+    @property
     def history(self) -> list[dict[str, Any]]:
         return self._conversation.messages
 
@@ -95,6 +113,11 @@ class Agent:
         if self._turn_lock.locked():
             raise AgentBusyError("当前回合尚未结束，无法清空历史")
         self._conversation.clear()
+
+    def close(self) -> None:
+        """关闭 MCP 连接等外部资源。"""
+        if self._mcp is not None:
+            self._mcp.close()
 
     def send(
         self,
@@ -143,7 +166,8 @@ class Agent:
         cancel: CancellationToken | None,
     ) -> TurnResult:
         failed_tools: dict[tuple[str, str], ToolResult] = {}
-        for round_index in range(self._max_tool_rounds):
+        round_index = 0
+        while self._max_tool_rounds <= 0 or round_index < self._max_tool_rounds:
             if cancel is not None and cancel.cancelled:
                 return TurnResult(ok=False, cancelled=True, error="已取消")
 
@@ -175,12 +199,19 @@ class Agent:
                     if cancel is not None and cancel.cancelled:
                         return TurnResult(ok=False, cancelled=True, error="已取消")
                     self._run_tool(round_index, call, on_event, failed_tools)
+                round_index += 1
                 continue
 
             self._conversation.add_assistant(content)
             return TurnResult(ok=True, content=content)
 
-        return TurnResult(ok=False, error="工具调用轮次过多，本轮已停止")
+        return TurnResult(
+            ok=False,
+            error=(
+                f"工具调用轮次已达到上限（{self._max_tool_rounds}），本次停止。"
+                "可在 config.ini 的 [agent] max_tool_rounds 调大该值，或设为 0 取消限制。"
+            ),
+        )
 
     def _run_tool(
         self,

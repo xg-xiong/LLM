@@ -390,7 +390,7 @@ Screen {
 
 #composer-row {
     width: 1fr;
-    height: 1;
+    height: auto;
 }
 
 #prompt-icon {
@@ -403,11 +403,18 @@ Screen {
 
 #prompt {
     width: 1fr;
-    height: 1;
+    height: auto;
+    min-height: 1;
+    max-height: 10;
     padding: 0 1;
     border: none;
     background: transparent;
     color: #e0e0e0;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: #1e1e1e;
+    scrollbar-color: #464848 55%;
+    scrollbar-color-hover: #6f7872 80%;
+    scrollbar-color-active: #ffa62b;
 }
 
 #prompt:focus {
@@ -415,11 +422,11 @@ Screen {
     background: transparent;
 }
 
-#prompt > .input--placeholder {
+#prompt .text-area--placeholder {
     color: #6c6c6c;
 }
 
-#prompt > .input--cursor {
+#prompt .text-area--cursor {
     background: #ffa62b;
     color: #121212;
 }

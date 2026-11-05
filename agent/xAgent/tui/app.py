@@ -18,7 +18,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, HorizontalGroup, VerticalGroup, VerticalScroll
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from core import (
     Agent,
@@ -33,7 +33,7 @@ from core import (
     TurnStarted,
 )
 
-from .widgets import ChatLog, TopBar
+from .widgets import ChatLog, PromptArea, TopBar
 
 
 class XAgentApp(App):
@@ -92,7 +92,8 @@ class XAgentApp(App):
                             markup=False,
                         )
                     yield Static(
-                        "Enter 发送   /help 命令   Esc 中断生成   Ctrl+B 侧栏   Ctrl+N 新会话",
+                        "Enter 发送   Shift+Enter 换行   /help 命令   "
+                        "Esc 中断生成   Ctrl+B 侧栏   Ctrl+N 新会话",
                         id="meta-hints",
                         markup=False,
                     )
@@ -100,8 +101,11 @@ class XAgentApp(App):
                     yield ChatLog(id="chat")
                 with Container(id="composer"), HorizontalGroup(id="composer-row"):
                     yield Static("›", id="prompt-icon", markup=False)
-                    yield Input(
-                        placeholder="输入问题后 Enter 发送；/help 查看命令；Esc 中断生成",
+                    yield PromptArea(
+                        placeholder=(
+                            "输入问题后 Enter 发送；Shift+Enter 换行；"
+                            "/help 查看命令；Esc 中断生成"
+                        ),
                         id="prompt",
                     )
                 with VerticalGroup(id="bottom-bar"):
@@ -179,6 +183,8 @@ class XAgentApp(App):
 
     def on_mount(self) -> None:
         self._show_welcome()
+        for issue in self.agent.mcp_issues:
+            self._chat.add_message("error", issue)
         self._set_idle_status()
         self._update_stats()
         if not self.agent.config.llm.has_api_key:
@@ -187,11 +193,12 @@ class XAgentApp(App):
                 "未配置 api_key，将尝试无鉴权访问（本地 Ollama 等可忽略）",
             )
         self.set_interval(0.5, self._tick_stats)
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptArea).focus()
 
     def on_unmount(self) -> None:
         if self._cancel_token is not None:
             self._cancel_token.cancel()
+        self.agent.close()
 
     def _tick_stats(self) -> None:
         if self._busy:
@@ -200,9 +207,9 @@ class XAgentApp(App):
     # ------------------------------------------------------------------ #
     # 输入与命令
     # ------------------------------------------------------------------ #
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_prompt_area_submitted(self, event: PromptArea.Submitted) -> None:
         text = event.value.strip()
-        event.input.value = ""
+        event.prompt.text = ""
         if not text:
             return
 
@@ -240,12 +247,13 @@ class XAgentApp(App):
             "  /quit    退出\n"
             "  /exit    退出\n\n"
             "快捷键:\n"
-            "  Enter    发送\n"
-            "  Esc      中断当前生成\n"
-            "  Ctrl+B   显示 / 隐藏侧栏\n"
-            "  Ctrl+N   开始新会话\n"
-            "  Ctrl+L   清空对话\n"
-            "  Ctrl+Q   退出\n\n"
+            "  Enter          发送\n"
+            "  Shift+Enter    换行（Ctrl+J 同效）\n"
+            "  Esc            中断当前生成\n"
+            "  Ctrl+B         显示 / 隐藏侧栏\n"
+            "  Ctrl+N         开始新会话\n"
+            "  Ctrl+L         清空对话\n"
+            "  Ctrl+Q         退出\n\n"
             "已注册工具:\n  " + "\n  ".join(self.agent.tool_names),
         )
 
@@ -273,7 +281,7 @@ class XAgentApp(App):
         self._chat.add_message("system", message)
         self._set_idle_status()
         self._update_stats()
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptArea).focus()
 
     def action_cancel_turn(self) -> None:
         if self._busy and self._cancel_token is not None:
@@ -314,7 +322,7 @@ class XAgentApp(App):
         self._set_busy_status("请求中…")
         self._update_stats()
 
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one("#prompt", PromptArea)
         prompt.disabled = True
         self._run_agent(text, self._cancel_token)
 
@@ -406,7 +414,7 @@ class XAgentApp(App):
         elif not event.ok and event.error:
             self._chat.add_message("error", event.error)
 
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one("#prompt", PromptArea)
         prompt.disabled = False
         prompt.focus()
         self._set_idle_status()
@@ -423,7 +431,7 @@ class XAgentApp(App):
         self._reset_round_state()
         self._chat.add_message("error", f"执行失败: {message}")
 
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one("#prompt", PromptArea)
         prompt.disabled = False
         prompt.focus()
         self._set_idle_status()

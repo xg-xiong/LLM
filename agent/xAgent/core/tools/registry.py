@@ -13,7 +13,7 @@ from typing import Any
 
 from core.models import ToolResult
 
-ToolHandler = Callable[[dict[str, Any]], str]
+ToolHandler = Callable[[dict[str, Any]], str | ToolResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,4 +79,6 @@ class ToolRegistry:
         except Exception as exc:  # noqa: BLE001 - 工具异常不能让整个会话崩溃
             return ToolResult(output=f"工具 {name} 执行异常: {exc}", is_error=True)
 
+        if isinstance(output, ToolResult):
+            return output
         return ToolResult(output=output if isinstance(output, str) else str(output))

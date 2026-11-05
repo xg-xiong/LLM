@@ -15,6 +15,8 @@
 - **网络搜索**：`searchWeb` 调用百度千帆搜索 API，返回实时摘要、标题与参考 URL
 - **本地 CLI 调用**：`Runcli` 使用 `subprocess` 和 `shell=False` 执行本机命令行程序
 - **Agent Skills**：启动时发现 `.agents/skills/*/SKILL.md`，按需通过 `loadSkill` 动态加载
+- **MCP 工具**：读取项目目录的 `.mcp.json`，连接 stdio / Streamable HTTP MCP Server，
+  自动发现工具并注册为 Function Calling 工具
 - **可扩展**：配置、LLM 客户端、工具、界面均为可替换的独立模块
 
 ## 目录结构
@@ -30,6 +32,7 @@ xAgent/
 │   ├── cancellation.py       # 线程安全取消令牌
 │   ├── prompts.py            # 系统提示词、Skill 注入与轮次上限
 │   ├── skills.py             # Agent Skills 发现与元数据注册
+│   ├── mcp.py                # MCP 客户端：.mcp.json、stdio / Streamable HTTP、工具发现
 │   ├── llm/
 │   │   ├── base.py           # ChatClient 端口（Protocol）
 │   │   └── openai_compat.py  # OpenAI 兼容流式客户端（requests）
@@ -39,7 +42,8 @@ xAgent/
 │       ├── filesystem.py     # 目录与文本文件操作
 │       ├── web.py            # curl 抓取网页 + trafilatura 提取 Markdown 正文
 │       ├── search.py         # 百度千帆搜索 API（searchWeb）
-│       └── skills.py         # Agent Skills 加载（loadSkill）
+│       ├── mcp.py            # 把 MCP 工具注册进 ToolRegistry
+│       └── skills.py         # Agent Skills 加载与创建（loadSkill / createSkill）
 ├── tui/                      # Textual 适配层
 │   ├── app.py                # App、事件桥接、命令、工作线程
 │   ├── widgets.py            # 对话区控件
@@ -77,6 +81,7 @@ xagent
 ```
 
 若未配置 `project_root`，则使用启动时的工作目录，并扫描该目录下的 `.agents/skills`。
+如需使用 MCP 工具，在同一项目根目录放置 `.mcp.json`，格式见 [MCP 工具](#mcp-工具)。
 
 界面只显示运行状态，不会展示模型名称、接口地址或 API Key。
 `config.ini` 已被 `.gitignore` 忽略，不会提交真实 Key。
@@ -93,6 +98,7 @@ xagent
 | 操作 | 说明 |
 | --- | --- |
 | Enter | 发送问题 |
+| Shift+Enter、Ctrl+J | 在输入框中换行；粘贴的多行内容会按多行显示 |
 | `/help` | 查看命令与工具列表 |
 | `/clear` | 清空对话历史 |
 | `/quit`、`/exit` | 退出 |
@@ -202,6 +208,10 @@ MY_TOOL = Tool(
 | `searchWeb` | 调用百度千帆搜索 API，返回实时摘要、来源标题和 URL |
 | `Runcli` | 以 `shell=False` 执行本地 CLI，返回 stdout、stderr 和退出码 |
 | `loadSkill` | 按需加载 Agent Skill 的 `SKILL.md` 或 Skill 目录内的附件文件 |
+| `createSkill` | 根据 `name` 和完整的 `skillContext` 创建新的 Agent Skill，不覆盖已有 Skill |
+
+此外，`.mcp.json` 中配置的 MCP 工具会在启动时动态加入工具表，名称与参数以 MCP Server
+返回的 `tools/list` 为准，详见 [MCP 工具](#mcp-工具)。
 
 `Runcli` 接收 `command` 与 `args` 列表，通过 `subprocess.run` 以运行 xAgent 的当前用户权限
 执行，不经过 Shell 字符串拼接。默认超时 30 秒，stdout/stderr 各最多保留 10,000 个字符，
@@ -258,8 +268,60 @@ description: Extract text and tables from PDF files when the user asks to inspec
 - 所有读取路径都会解析并检查，必须位于指定 Skill 目录内部；越界路径、符号链接逃逸和二进制文件
   会被拒绝。
 
+`createSkill` 的行为：
+
+- 参数 `name` 必须是符合规范的 Skill 名称；`skillContext` 必须是完整的 `SKILL.md` 内容。
+- `skillContext` 必须包含 YAML Frontmatter、与参数一致的 `name`、非空 `description` 和正文；
+  不符合规范时工具会返回明确错误，不会写入文件。
+- 工具创建 `<project_root>/.agents/skills/<name>/SKILL.md`，写入后立即注册到当前
+  `SkillRegistry`，因此同一轮对话中可以继续调用 `loadSkill`。
+- 如果目标目录或 Skill 已存在，工具只返回提示，不会覆盖原有内容。
+- 如需创建 `references/`、`scripts/` 等目录或辅助文件，LLM 应继续调用
+  `createDirectory`、`createFile` 等 fileOps 工具。
+
 缺少必需字段、Frontmatter 损坏、名称非法或重复的 Skill 会被跳过，并记录在
 `SkillRegistry.issues` 中。Skill 可与 `Runcli`、文件工具、`fetchWeb` 等现有工具协同使用。
+
+## MCP 工具
+
+启动时读取项目根目录的 `.mcp.json`（与 Agent Skills 使用同一个 `project_root`）。
+文件不存在时直接跳过；JSON、字段或单个 Server 配置有误时只记录问题，不会阻止 xAgent 启动。
+
+支持两种传输：
+
+```json
+{
+  "mcpServers": {
+    "Bazi-MCP": {
+      "type": "streamable_http",
+      "url": "https://example.com/mcp",
+      "headers": {"Authorization": "Bearer ..."},
+      "timeout": 60
+    },
+    "local-tools": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["server.py"],
+      "env": {"LOG_LEVEL": "INFO"},
+      "cwd": "tools/mcp-server",
+      "timeout": 30
+    }
+  }
+}
+```
+
+- `type` 可省略：有 `url` 时按 `streamable_http`，否则按 `stdio`。
+- `stdio` 的 `cwd` 相对路径按 `.mcp.json` 所在目录解析；`command` 需要通过 `PATH` 找到，
+  或写成绝对路径。
+- `disabled: true` 可临时禁用一个 Server。
+- 连接成功后调用 MCP `tools/list`，把工具注册到现有 Function Calling 工具表。
+- 工具名优先保持原名；与本地工具或已有 MCP 工具冲突时，使用
+  `<server>__<tool>` 前缀，仍冲突则追加 `_2`、`_3`。
+- MCP 调用的文本、`structuredContent`、资源内容和 `isError` 都会转换为 `ToolResult`；
+  单个工具调用失败只返回错误结果，不影响后续对话。
+- 连接失败、超时和配置错误会显示在 TUI 启动信息中，同时保留在
+  `Agent.mcp_issues`，便于 Web / Desktop 适配层展示。
+- stdio Server 的 stderr 不会写入 TUI；启动失败仍会通过异常信息上报。
 
 ## 配置
 
@@ -273,7 +335,12 @@ description: Extract text and tables from PDF files when the user asks to inspec
 | `[llm] temperature` | `XAGENT_TEMPERATURE` | `0.7` |
 | `[search] baidu_qianfan_api_key` | `XAGENT_SEARCH_API_KEY` | 空 |
 | `[agent] project_root` | `XAGENT_PROJECT_ROOT` | 启动时工作目录 |
+| `[agent] max_tool_rounds` | `XAGENT_MAX_TOOL_ROUNDS` | `100` |
 | 配置文件路径 | `XAGENT_CONFIG` | `xAgent/config.ini` |
+
+单轮对话默认最多允许 100 轮工具调用，避免复杂任务在完成前被过早中断。
+将 `max_tool_rounds` 设为 `0` 可以取消限制，Agent 会持续调用工具直到任务完成、
+模型不再请求工具或用户按 Esc 取消。
 
 ## 与 chat3.py 的对应关系
 
@@ -290,4 +357,5 @@ description: Extract text and tables from PDF files when the user asks to inspec
 `getFileType`、`readTextFile`、`createFile`、`editFile`、`createDirectory`、
 `deleteDirectory`、`deleteFile`、`renameFileOrDirectory`）均已保留；另外新增
 `fetchWeb` 用于读取网页正文，`searchWeb` 用于联网搜索，`Runcli` 用于调用本地命令行程序，
-`loadSkill` 用于按需加载 Agent Skills。
+`loadSkill` 用于按需加载 Agent Skills，`createSkill` 用于创建新的 Agent Skills，
+以及从 `.mcp.json` 动态发现的 MCP 工具。

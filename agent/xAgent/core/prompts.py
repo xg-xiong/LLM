@@ -9,6 +9,8 @@ from core.skills import Skill
 SYSTEM_PROMPT = (
     "你是一个乐于助人的AI助手。你可以调用已注册的工具（日期、闰年、本地文件操作）来完成任务；"
     "执行删除、覆盖等破坏性操作前，请先确认用户意图。\n"
+    "如果任务包含多个步骤，请连续调用工具完成全部步骤后再回复；"
+    "除破坏性操作外，不要因为步骤较多而提前停止或反复请求用户确认。\n"
     "请严格按以下格式回复：\n"
     "第一行只输出 ---\n"
     "随后输出对问题的回答正文（可多行）\n"
@@ -41,4 +43,4 @@ def build_system_prompt(base_prompt: str, skills: Sequence[Skill]) -> str:
     return "\n".join(lines)
 
 
-MAX_TOOL_ROUNDS = 8
+MAX_TOOL_ROUNDS = 100

@@ -3,7 +3,7 @@
 
 配置来源优先级（高 -> 低）：
 1. 环境变量 XAGENT_BASE_URL / XAGENT_MODEL / XAGENT_API_KEY / XAGENT_TEMPERATURE /
-   XAGENT_SEARCH_API_KEY / XAGENT_PROJECT_ROOT
+   XAGENT_SEARCH_API_KEY / XAGENT_PROJECT_ROOT / XAGENT_MAX_TOOL_ROUNDS
 2. config.ini 的 [llm] / [search] / [agent] 段（路径可由 XAGENT_CONFIG 指定）
 3. 内置默认值
 
@@ -16,6 +16,8 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from core.prompts import MAX_TOOL_ROUNDS
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.ini"
 
@@ -47,6 +49,7 @@ class AppConfig:
     search: SearchConfig = field(default_factory=SearchConfig)
     source: Path | None = None
     project_root: Path | None = None
+    max_tool_rounds: int = MAX_TOOL_ROUNDS
 
     @classmethod
     def load(
@@ -83,11 +86,25 @@ class AppConfig:
             "project_root",
             "",
         )
+        max_tool_rounds_raw = _pick(
+            env,
+            "XAGENT_MAX_TOOL_ROUNDS",
+            agent_section,
+            "max_tool_rounds",
+            str(MAX_TOOL_ROUNDS),
+        )
 
         try:
             temperature = float(temperature_raw)
         except (TypeError, ValueError):
             temperature = 0.7
+
+        try:
+            max_tool_rounds = int(max_tool_rounds_raw)
+        except (TypeError, ValueError):
+            max_tool_rounds = MAX_TOOL_ROUNDS
+        if max_tool_rounds < 0:
+            max_tool_rounds = MAX_TOOL_ROUNDS
 
         project_root_text = str(project_root_raw).strip()
         project_root = Path(project_root_text).expanduser() if project_root_text else None
@@ -104,6 +121,7 @@ class AppConfig:
             ),
             source=config_path.resolve(),
             project_root=project_root,
+            max_tool_rounds=max_tool_rounds,
         )
 
 

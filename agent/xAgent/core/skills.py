@@ -65,6 +65,14 @@ class SkillRegistry:
     def get(self, name: str) -> Skill | None:
         return self._by_name.get(name)
 
+    def add(self, skill: Skill) -> None:
+        if skill.name in self._by_name:
+            raise ValueError(f"Skill 已存在: {skill.name}")
+        self._skills = tuple(
+            sorted((*self._skills, skill), key=lambda item: item.name)
+        )
+        self._by_name[skill.name] = skill
+
     @classmethod
     def discover(cls, project_root: str | Path | None = None) -> SkillRegistry:
         root = Path.cwd() if project_root is None else Path(project_root)
@@ -138,12 +146,21 @@ def _read_frontmatter(skill_file: Path) -> str:
     raise SkillDiscoveryError("YAML Frontmatter 缺少结束分隔符 `---`")
 
 
-def _load_skill_metadata(directory: Path) -> Skill:
-    skill_file = directory / SKILL_FILENAME
-    if not skill_file.is_file():
-        raise SkillDiscoveryError(f"缺少 {SKILL_FILENAME}")
+def validate_skill_name(name: str) -> str:
+    if not isinstance(name, str) or not name.strip():
+        raise SkillDiscoveryError("Skill 名称必须是非空字符串")
 
-    frontmatter = _read_frontmatter(skill_file)
+    name = name.strip()
+    if len(name) > MAX_SKILL_NAME_LENGTH:
+        raise SkillDiscoveryError(f"skill name 超过 {MAX_SKILL_NAME_LENGTH} 个字符")
+    if not _SKILL_NAME_RE.fullmatch(name):
+        raise SkillDiscoveryError(
+            "skill name 只能包含小写字母、数字和连字符，且不能以连字符开头或结尾"
+        )
+    return name
+
+
+def _parse_frontmatter_metadata(frontmatter: str) -> tuple[str, str]:
     try:
         data = yaml.safe_load(frontmatter)
     except yaml.YAMLError as exc:
@@ -159,16 +176,64 @@ def _load_skill_metadata(directory: Path) -> Skill:
     if not isinstance(description, str) or not description.strip():
         raise SkillDiscoveryError("YAML Frontmatter 缺少非空字符串字段 description")
 
-    name = name.strip()
+    name = validate_skill_name(name)
     description = description.strip()
-    if len(name) > MAX_SKILL_NAME_LENGTH:
-        raise SkillDiscoveryError(f"skill name 超过 {MAX_SKILL_NAME_LENGTH} 个字符")
-    if not _SKILL_NAME_RE.fullmatch(name):
-        raise SkillDiscoveryError(
-            "skill name 只能包含小写字母、数字和连字符，且不能以连字符开头或结尾"
-        )
     if len(description) > MAX_DESCRIPTION_LENGTH:
         raise SkillDiscoveryError(f"description 超过 {MAX_DESCRIPTION_LENGTH} 个字符")
+    return name, description
+
+
+def _split_skill_markdown(content: str) -> tuple[str, str]:
+    text = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        raise SkillDiscoveryError("SKILL.md 必须以 YAML Frontmatter (`---`) 开头")
+
+    closing_index = None
+    for index in range(1, len(lines)):
+        if lines[index].strip() in {"---", "..."}:
+            closing_index = index
+            break
+    if closing_index is None:
+        raise SkillDiscoveryError("YAML Frontmatter 缺少结束分隔符 `---`")
+
+    frontmatter = "\n".join(lines[1:closing_index])
+    if not frontmatter.strip():
+        raise SkillDiscoveryError("YAML Frontmatter 不能为空")
+    if len(frontmatter) > MAX_FRONTMATTER_CHARS:
+        raise SkillDiscoveryError(
+            f"YAML Frontmatter 超过 {MAX_FRONTMATTER_CHARS} 个字符"
+        )
+
+    body = "\n".join(lines[closing_index + 1 :])
+    return frontmatter, body
+
+
+def validate_skill_definition(name: str, content: str) -> tuple[str, str]:
+    expected_name = validate_skill_name(name)
+    if not isinstance(content, str) or not content.strip():
+        raise SkillDiscoveryError("skillContext 必须是非空字符串")
+
+    frontmatter, body = _split_skill_markdown(content)
+    actual_name, description = _parse_frontmatter_metadata(frontmatter)
+    if actual_name != expected_name:
+        raise SkillDiscoveryError(
+            f"Frontmatter 中的 name {actual_name!r} 与参数 name {expected_name!r} 不一致"
+        )
+    if not body.strip():
+        raise SkillDiscoveryError("SKILL.md 正文不能为空")
+
+    normalized = f"---\n{frontmatter.strip()}\n---\n\n{body.strip()}\n"
+    return normalized, description
+
+
+def _load_skill_metadata(directory: Path) -> Skill:
+    skill_file = directory / SKILL_FILENAME
+    if not skill_file.is_file():
+        raise SkillDiscoveryError(f"缺少 {SKILL_FILENAME}")
+
+    frontmatter = _read_frontmatter(skill_file)
+    name, description = _parse_frontmatter_metadata(frontmatter)
 
     resolved_directory = directory.resolve()
     resolved_skill_file = skill_file.resolve()
@@ -192,4 +257,6 @@ __all__ = [
     "SkillDiscoveryError",
     "SkillIssue",
     "SkillRegistry",
+    "validate_skill_definition",
+    "validate_skill_name",
 ]
