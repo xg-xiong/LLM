@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
@@ -27,6 +27,9 @@ class Conversation:
     def add_user(self, text: str) -> None:
         self._messages.append({"role": "user", "content": text})
 
+    def add_system(self, content: str) -> None:
+        self._messages.append({"role": "system", "content": content})
+
     def add_assistant(
         self,
         content: str | None,
@@ -46,11 +49,34 @@ class Conversation:
             }
         )
 
+    def replace_with_summary(self, summary: str) -> None:
+        """保留 System Prompt，用压缩摘要替换其余历史消息。"""
+        self._messages = [
+            {"role": "system", "content": self._system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "以下是此前对话的压缩摘要，请将其视为已经发生的历史上下文，"
+                    "并在此基础上继续完成用户的任务。\n\n"
+                    f"{summary}"
+                ),
+            },
+        ]
+
     def snapshot(self) -> list[dict[str, Any]]:
         return list(self._messages)
 
     def restore(self, snapshot: list[dict[str, Any]]) -> None:
         self._messages[:] = snapshot
+
+    def replace_messages(self, messages: Sequence[Mapping[str, Any]]) -> None:
+        """恢复完整历史；始终保证第一条是当前 System Prompt。"""
+        restored = [dict(message) for message in messages]
+        if not restored or restored[0].get("role") != "system":
+            restored.insert(0, {"role": "system", "content": self._system_prompt})
+        else:
+            restored[0] = {"role": "system", "content": self._system_prompt}
+        self._messages[:] = restored
 
     def clear(self) -> None:
         self._messages = [{"role": "system", "content": self._system_prompt}]

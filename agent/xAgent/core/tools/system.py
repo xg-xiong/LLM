@@ -8,10 +8,9 @@ import os
 import subprocess
 from typing import Any
 
-from .registry import Tool
+from core.config import CLIConfig
 
-CLI_TIMEOUT_SECONDS = 30
-CLI_MAX_STREAM_CHARS = 10_000
+from .registry import Tool
 
 
 def _decode(data: bytes | str) -> str:
@@ -29,8 +28,12 @@ def _decode(data: bytes | str) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def get_date(args: dict[str, Any] | None = None) -> str:
+def get_date(
+    args: dict[str, Any] | None = None,
+    config: CLIConfig | None = None,
+) -> str:
     """调用本地 date 命令获取当前日期和时间（不用 python 时间库）。"""
+    config = config or CLIConfig()
     if os.name == "nt":
         # Windows 下 date 不带参数会进入“输入新的日期”的交互设置，必须加 /t；
         # 时间一并用 time /t 取出
@@ -39,7 +42,12 @@ def get_date(args: dict[str, Any] | None = None) -> str:
         cmd = ["date"]
 
     try:
-        proc = subprocess.run(cmd, check=False, capture_output=True, timeout=15)
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            timeout=config.date_timeout_seconds,
+        )
     except subprocess.TimeoutExpired:
         return "执行 date 命令超时"
     except OSError as exc:
@@ -103,14 +111,18 @@ def _parse_cli_args(args: dict[str, Any]) -> tuple[str, list[str]]:
     return command.strip(), [item if isinstance(item, str) else str(item) for item in raw_args]
 
 
-def _truncate_cli_stream(text: str, label: str) -> tuple[str, str | None]:
-    if len(text) <= CLI_MAX_STREAM_CHARS:
+def _truncate_cli_stream(
+    text: str,
+    label: str,
+    max_chars: int,
+) -> tuple[str, str | None]:
+    if len(text) <= max_chars:
         return text, None
     note = (
-        f"{label} 已截断：仅显示前 {CLI_MAX_STREAM_CHARS} 个字符"
+        f"{label} 已截断：仅显示前 {max_chars} 个字符"
         f"（原始 {len(text)} 个字符）"
     )
-    return text[:CLI_MAX_STREAM_CHARS].rstrip(), note
+    return text[:max_chars].rstrip(), note
 
 
 def _format_cli_result(
@@ -119,17 +131,26 @@ def _format_cli_result(
     returncode: int | None,
     stdout: str,
     stderr: str,
+    *,
+    config: CLIConfig | None = None,
     timed_out: bool = False,
 ) -> str:
-    stdout, stdout_note = _truncate_cli_stream(stdout, "stdout")
-    stderr, stderr_note = _truncate_cli_stream(stderr, "stderr")
+    config = config or CLIConfig()
+    stdout, stdout_note = _truncate_cli_stream(
+        stdout, "stdout", config.max_stream_chars
+    )
+    stderr, stderr_note = _truncate_cli_stream(
+        stderr, "stderr", config.max_stream_chars
+    )
 
     lines = [
         f"命令: {command}",
         f"参数: {json.dumps(cli_args, ensure_ascii=False)}",
     ]
     if timed_out:
-        lines.append(f"退出码: 无（执行超过 {CLI_TIMEOUT_SECONDS} 秒，已强制终止）")
+        lines.append(
+            f"退出码: 无（执行超过 {config.timeout_seconds:g} 秒，已强制终止）"
+        )
     else:
         lines.append(f"退出码: {returncode}")
     lines.extend(
@@ -147,14 +168,15 @@ def _format_cli_result(
     return "\n".join(lines)
 
 
-def run_cli(args: dict[str, Any]) -> str:
+def run_cli(args: dict[str, Any], config: CLIConfig | None = None) -> str:
+    config = config or CLIConfig()
     command, cli_args = _parse_cli_args(args)
     try:
         proc = subprocess.run(
             [command, *cli_args],
             check=False,
             capture_output=True,
-            timeout=CLI_TIMEOUT_SECONDS,
+            timeout=config.timeout_seconds,
             stdin=subprocess.DEVNULL,
             shell=False,
         )
@@ -165,6 +187,7 @@ def run_cli(args: dict[str, Any]) -> str:
             None,
             _decode(exc.stdout or b""),
             _decode(exc.stderr or b""),
+            config=config,
             timed_out=True,
         )
         raise ValueError(f"命令执行超时\n{result}") from exc
@@ -183,16 +206,25 @@ def run_cli(args: dict[str, Any]) -> str:
         proc.returncode,
         _decode(proc.stdout),
         _decode(proc.stderr),
+        config=config,
     )
 
 
-def build_system_tools() -> list[Tool]:
+def build_system_tools(config: CLIConfig | None = None) -> list[Tool]:
+    config = config or CLIConfig()
+
+    def date_handler(args: dict[str, Any]) -> str:
+        return get_date(args, config)
+
+    def cli_handler(args: dict[str, Any]) -> str:
+        return run_cli(args, config)
+
     return [
         Tool(
             name="getDate",
             description="获取当前电脑的日期和时间，直接调用本地 date 命令得到系统日期与时间",
             parameters={"type": "object", "properties": {}, "required": []},
-            handler=get_date,
+            handler=date_handler,
         ),
         Tool(
             name="isLeapYear",
@@ -239,6 +271,6 @@ def build_system_tools() -> list[Tool]:
                 },
                 "required": ["command", "args"],
             },
-            handler=run_cli,
+            handler=cli_handler,
         ),
     ]

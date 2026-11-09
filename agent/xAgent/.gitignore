@@ -1,6 +1,9 @@
 # 本地配置，含真实 API Key，不提交
 config.ini
 
+# 上下文压缩归档（可能包含完整对话内容）
+.agents/context/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -12,3 +15,6 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# 会话快照与事件日志（可能包含完整对话内容）
+.agents/sessions/

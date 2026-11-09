@@ -12,13 +12,6 @@ from core.config import SearchConfig
 
 from .registry import Tool
 
-SEARCH_ENDPOINT = "https://qianfan.baidubce.com/v2/ai_search/web_search"
-CONNECT_TIMEOUT = 10
-READ_TIMEOUT = 30
-TOP_K = 8
-MAX_QUERY_UNITS = 72
-MAX_SNIPPET_CHARS = 700
-
 _CONTROL_CHARS_RE = re.compile(
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]"
 )
@@ -35,26 +28,26 @@ def _query_units(text: str) -> int:
     return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in text)
 
 
-def _prepare_query(raw: Any) -> tuple[str, bool]:
+def _prepare_query(raw: Any, max_units: int) -> tuple[str, bool]:
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError("缺少参数 query 或 query 不是非空字符串")
 
     query = " ".join(raw.split())
-    if _query_units(query) <= MAX_QUERY_UNITS:
+    if _query_units(query) <= max_units:
         return query, False
 
     kept: list[str] = []
     used = 0
     for char in query:
         size = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
-        if used + size > MAX_QUERY_UNITS:
+        if used + size > max_units:
             break
         kept.append(char)
         used += size
     return "".join(kept).rstrip(), True
 
 
-def _truncate(text: str, limit: int = MAX_SNIPPET_CHARS) -> str:
+def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "..."
@@ -92,11 +85,18 @@ def _api_error(response: requests.Response) -> str:
     )
 
 
-def _format_results(query: str, truncated: bool, references: list[Any]) -> str:
+def _format_results(
+    query: str,
+    truncated: bool,
+    references: list[Any],
+    *,
+    max_query_units: int,
+    max_snippet_chars: int,
+) -> str:
     lines = [f"搜索词: {query}"]
     if truncated:
         lines.append(
-            f"注意: query 超过 API 长度限制，已截断为前 {MAX_QUERY_UNITS} 个字符"
+            f"注意: query 超过 API 长度限制，已截断为前 {max_query_units} 个字符"
             "（一个汉字按 2 个字符计）"
         )
 
@@ -121,7 +121,7 @@ def _format_results(query: str, truncated: bool, references: list[Any]) -> str:
         if meta:
             lines.append(f"来源信息: {meta}")
         if snippet:
-            lines.append(f"摘要: {_truncate(snippet)}")
+            lines.append(f"摘要: {_truncate(snippet, max_snippet_chars)}")
 
     if count == 0:
         lines.extend(["", "未找到相关搜索结果。"])
@@ -138,12 +138,15 @@ def search_web(args: dict[str, Any], config: SearchConfig) -> str:
             "baidu_qianfan_api_key"
         )
 
-    query, truncated = _prepare_query(args.get("query") if isinstance(args, dict) else None)
+    query, truncated = _prepare_query(
+        args.get("query") if isinstance(args, dict) else None,
+        config.max_query_units,
+    )
     payload = {
         "messages": [{"role": "user", "content": query}],
         "search_source": "baidu_search_v2",
         "edition": "standard",
-        "resource_type_filter": [{"type": "web", "top_k": TOP_K}],
+        "resource_type_filter": [{"type": "web", "top_k": config.top_k}],
         "query_policy": {"enable_rewrite": True},
         "safe_search": True,
     }
@@ -154,10 +157,10 @@ def search_web(args: dict[str, Any], config: SearchConfig) -> str:
 
     try:
         response = requests.post(
-            SEARCH_ENDPOINT,
+            config.endpoint,
             json=payload,
             headers=headers,
-            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+            timeout=(config.connect_timeout, config.read_timeout),
         )
     except requests.Timeout as exc:
         raise ValueError("百度千帆搜索请求超时，请稍后重试") from exc
@@ -182,7 +185,13 @@ def search_web(args: dict[str, Any], config: SearchConfig) -> str:
     references = data.get("references") or []
     if not isinstance(references, list):
         raise ValueError("百度千帆搜索 API 返回的 references 字段格式异常")
-    return _format_results(query, truncated, references)
+    return _format_results(
+        query,
+        truncated,
+        references,
+        max_query_units=config.max_query_units,
+        max_snippet_chars=config.max_snippet_chars,
+    )
 
 
 def build_search_tools(config: SearchConfig) -> list[Tool]:
@@ -202,7 +211,8 @@ def build_search_tools(config: SearchConfig) -> list[Tool]:
                     "query": {
                         "type": "string",
                         "description": (
-                            "搜索关键词或问题，尽量精简；API 最多支持约 72 个字符"
+                            "搜索关键词或问题，尽量精简；API 最多支持约 "
+                            f"{config.max_query_units} 个字符"
                             "（一个汉字按 2 个字符计）"
                         ),
                     }

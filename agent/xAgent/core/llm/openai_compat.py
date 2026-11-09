@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """OpenAI 兼容接口的流式客户端（DeepSeek / Ollama / vLLM 等）。
 
 该适配器只依赖 requests，不向 stdout 写任何内容；错误通过 ChatResult
@@ -15,10 +15,7 @@ import requests
 
 from core.cancellation import CancellationToken
 from core.config import LLMConfig
-from core.models import ChatResult
-
-CONNECT_TIMEOUT = 10
-READ_TIMEOUT = 120
+from core.models import ChatResult, TokenUsage
 
 
 class OpenAICompatibleClient:
@@ -50,16 +47,30 @@ class OpenAICompatibleClient:
             "tool_choice": "auto",
         }
 
+        # 优先请求流式 usage；部分兼容服务不支持 stream_options，收到 4xx 后再退回。
         try:
             resp = requests.post(
                 url,
-                json=payload,
+                json={**payload, "stream_options": {"include_usage": True}},
                 headers=headers,
-                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                timeout=(self._config.connect_timeout, self._config.read_timeout),
                 stream=True,
             )
         except requests.RequestException:
             return ChatResult(ok=False, error="请检查 base_url 与网络连接")
+
+        if resp.status_code in (400, 422):
+            resp.close()
+            try:
+                resp = requests.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=(self._config.connect_timeout, self._config.read_timeout),
+                    stream=True,
+                )
+            except requests.RequestException:
+                return ChatResult(ok=False, error="请检查 base_url 与网络连接")
 
         if resp.status_code != 200:
             detail = ""
@@ -74,6 +85,7 @@ class OpenAICompatibleClient:
         raw_lines: list[bytes] = []
         bucket: dict[int, dict[str, Any]] = {}
         saw_sse = False
+        usage: TokenUsage | None = None
 
         guard = cancel.on_cancel(resp.close) if cancel is not None else nullcontext()
         try:
@@ -93,8 +105,16 @@ class OpenAICompatibleClient:
                         break
 
                     try:
-                        choice = json.loads(data)["choices"][0]
-                    except (ValueError, KeyError, IndexError):
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    usage = _parse_usage(chunk.get("usage")) or usage
+
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, Mapping):
                         continue
 
                     delta = choice.get("delta") or {}
@@ -107,10 +127,12 @@ class OpenAICompatibleClient:
                             _merge_tool_call(bucket, piece)
 
                 if not saw_sse and raw_lines:
-                    message = json.loads(
+                    body = json.loads(
                         b"\n".join(raw_lines).decode("utf-8", errors="replace")
-                    )["choices"][0]["message"]
+                    )
+                    message = body["choices"][0]["message"]
                     _parse_message(message, parts, bucket, on_text)
+                    usage = _parse_usage(body.get("usage")) or usage
         except (requests.RequestException, OSError):
             if cancel is not None and cancel.cancelled:
                 return ChatResult(ok=False, cancelled=True, error="已取消")
@@ -123,7 +145,12 @@ class OpenAICompatibleClient:
             resp.close()
 
         tool_calls = tuple(bucket[i] for i in sorted(bucket))
-        return ChatResult(ok=True, content="".join(parts), tool_calls=tool_calls)
+        return ChatResult(
+            ok=True,
+            content="".join(parts),
+            tool_calls=tool_calls,
+            usage=usage,
+        )
 
 
 def _status_error(status_code: int, detail: str) -> str:
@@ -152,6 +179,26 @@ def _merge_tool_call(bucket: dict[int, dict[str, Any]], piece: Mapping[str, Any]
         slot["function"]["name"] = fn["name"]
     if fn.get("arguments"):
         slot["function"]["arguments"] += fn["arguments"]
+
+
+def _parse_usage(raw: Any) -> TokenUsage | None:
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        prompt = int(raw.get("prompt_tokens") or 0)
+        completion = int(raw.get("completion_tokens") or 0)
+        total = int(raw.get("total_tokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        total = prompt + completion
+    if total <= 0:
+        return None
+    return TokenUsage(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=total,
+    )
 
 
 def _parse_message(

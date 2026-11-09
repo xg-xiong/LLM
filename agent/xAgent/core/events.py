@@ -55,6 +55,32 @@ class TurnFinished:
     cancelled: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ContextUsageUpdated:
+    """当前上下文用量。ratio 为 0~1 的小数，warning 表示已达到压缩阈值。"""
+
+    used_tokens: int
+    window_tokens: int
+    ratio: float
+    warning: bool
+    default_window: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionStarted:
+    archive_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionFinished:
+    ok: bool
+    archive_id: str = ""
+    summary: str = ""
+    original_text: str = ""
+    timestamp: str = ""
+    error: str | None = None
+
+
 AgentEvent = (
     TurnStarted
     | AssistantDelta
@@ -62,6 +88,9 @@ AgentEvent = (
     | ToolCallStarted
     | ToolCallFinished
     | TurnFinished
+    | ContextUsageUpdated
+    | CompactionStarted
+    | CompactionFinished
 )
 
 EventSink = Callable[[AgentEvent], None]

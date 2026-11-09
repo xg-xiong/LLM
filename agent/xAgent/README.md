@@ -15,8 +15,15 @@
 - **网络搜索**：`searchWeb` 调用百度千帆搜索 API，返回实时摘要、标题与参考 URL
 - **本地 CLI 调用**：`Runcli` 使用 `subprocess` 和 `shell=False` 执行本机命令行程序
 - **Agent Skills**：启动时发现 `.agents/skills/*/SKILL.md`，按需通过 `loadSkill` 动态加载
-- **MCP 工具**：读取项目目录的 `.mcp.json`，连接 stdio / Streamable HTTP MCP Server，
-  自动发现工具并注册为 Function Calling 工具
+- **MCP 工具**：读取项目目录的 `.mcp.json`，在后台异步连接 stdio / Streamable HTTP MCP Server，
+  自动发现工具并注册为 Function Calling 工具，侧栏实时显示连接状态
+- **会话管理**：`/new` 保存并新建会话，`/save` 手动保存，`/resume` 选择恢复；每轮对话、
+  工具调用与压缩都会写入 `.agents/sessions/` 的会话快照和事件日志
+- **AGENTS.md**：会话首次加载时把项目根目录的 `AGENTS.md` 注入对话历史，恢复会话时不重复注入
+- **斜杠补全**：输入 `/` 自动列出命令与说明，↑/↓ 选择、Enter 应用、Esc 关闭
+- **首次运行配置**：当前目录没有 `config.ini` 时自动生成完整模板，并弹窗提示编辑后重启
+- **上下文压缩**：达到上下文窗口 60% 时提醒并暂停普通输入，`/compact` 归档原文、生成摘要并替换历史
+- **历史检索**：`recallContext` 在 `.agents/context/*.jsonl` 中按关键词找回压缩前的原始消息
 - **可扩展**：配置、LLM 客户端、工具、界面均为可替换的独立模块
 
 ## 目录结构
@@ -26,12 +33,14 @@ xAgent/
 ├── core/                     # 业务核心（无 UI 依赖）
 │   ├── agent.py              # Agent 编排：对话、工具循环、事件、回滚
 │   ├── config.py             # config.ini + 环境变量解析
-│   ├── conversation.py       # 对话历史 / 快照 / 回滚
+│   ├── conversation.py       # 对话历史 / 快照 / 回滚 / 摘要替换
+│   ├── context.py            # Token 监控、原始上下文归档、关键词检索
 │   ├── events.py             # UI 无关事件契约
-│   ├── models.py             # ChatResult / ToolResult / TurnResult
+│   ├── models.py             # ChatResult / TokenUsage / ToolResult / TurnResult
 │   ├── cancellation.py       # 线程安全取消令牌
 │   ├── prompts.py            # 系统提示词、Skill 注入与轮次上限
 │   ├── skills.py             # Agent Skills 发现与元数据注册
+│   ├── session.py            # 会话快照 / 事件日志 / 列表与恢复
 │   ├── mcp.py                # MCP 客户端：.mcp.json、stdio / Streamable HTTP、工具发现
 │   ├── llm/
 │   │   ├── base.py           # ChatClient 端口（Protocol）
@@ -42,6 +51,7 @@ xAgent/
 │       ├── filesystem.py     # 目录与文本文件操作
 │       ├── web.py            # curl 抓取网页 + trafilatura 提取 Markdown 正文
 │       ├── search.py         # 百度千帆搜索 API（searchWeb）
+│       ├── context.py        # recallContext：检索压缩前的原始上下文归档
 │       ├── mcp.py            # 把 MCP 工具注册进 ToolRegistry
 │       └── skills.py         # Agent Skills 加载与创建（loadSkill / createSkill）
 ├── tui/                      # Textual 适配层
@@ -65,13 +75,16 @@ xAgent/
 # 1. 安装依赖（同时安装 xagent 命令）
 python -m pip install -e .
 
-# 2. 准备配置
-Copy-Item config.example.ini config.ini
-# 编辑 config.ini，填入 base_url / model_name / api_key
+# 2. 直接启动
+python main.py
 ```
 
+首次启动时如果当前目录没有 `config.ini`，程序会自动生成完整模板并弹窗提示；
+编辑生成文件中的 `base_url` / `model_name` / `api_key` 后重新启动即可。
+也可以手动执行 `Copy-Item config.example.ini config.ini` 后编辑。
+
 在 `config.ini` 的 `[agent] project_root` 配置好 Agent Skills 项目根目录后，可以在任意目录启动，
-例如直接从仓库根目录运行：
+例如直接从仓库根目录运行（此时配置文件和会话目录都位于该工作目录）：
 
 ```powershell
 cd D:\opencode_xg\LLM
@@ -88,8 +101,8 @@ xagent
 
 ### 常见问题
 
-- **提示 API Key 无效**：确认 `agent/xAgent/config.ini` 的 `[llm] api_key` 已填写真实值，
-  而不是 `config.example.ini` 里的占位符；本项目默认只读取本目录的 `config.ini`。
+- **提示 API Key 无效**：确认启动时工作目录下的 `config.ini` 的 `[llm] api_key` 已填写真实值，
+  而不是生成模板 / `config.example.ini` 里的占位符；也可用 `XAGENT_CONFIG` 指定配置文件。
 - **连接失败**：检查 `base_url` 是否可达；使用本机 Ollama 时通常不需要 API Key。
 - 模型名称、接口地址和 Key 都不会出现在界面或日志中。
 
@@ -100,14 +113,59 @@ xagent
 | Enter | 发送问题 |
 | Shift+Enter、Ctrl+J | 在输入框中换行；粘贴的多行内容会按多行显示 |
 | `/help` | 查看命令与工具列表 |
-| `/clear` | 清空对话历史 |
-| `/quit`、`/exit` | 退出 |
+| `/new` | 保存当前会话并开始新会话 |
+| `/save` | 保存当前会话 |
+| `/resume`、`/sessions` | 上下选择并恢复已保存会话 |
+| `/compact` | 归档当前上下文并压缩为摘要 |
+| `/clear` | 清空当前对话历史 |
+| `/tools`、`/skills`、`/status` | 查看工具、Skills、会话与上下文状态 |
+| `/quit`、`/exit` | 保存并退出 |
+| 输入 `/` | 显示斜杠命令补全，↑/↓ 选择，Enter 应用，Esc 关闭 |
 | Ctrl+C | 处理中取消当前回合；空闲时退出 |
 | Ctrl+L | 清空对话 |
-| Ctrl+Q | 退出 |
+| Ctrl+Q | 保存并退出 |
 
 界面会把流式正文逐字写入对话区，工具调用与返回以独立消息块展示。
 模型名称、接口地址与 API Key 只在 `config.ini` 中维护，不会显示在界面上。
+
+顶部栏会实时显示「上下文使用量 / 窗口大小 · 百分比」。优先使用模型接口返回的
+`usage.total_tokens`，拿不到时按字符数估算。窗口大小可通过 `[llm] context_window`
+或 `XAGENT_CONTEXT_WINDOW` 指定；未指定时使用 128k 并标注「默认」。
+
+## 上下文压缩与历史检索
+
+每次 LLM 响应后都会检查上下文用量。达到窗口的 60% 时，TUI 会提示执行 `/compact`，
+并暂停接受新的普通提示词（命令仍可使用）。手动执行 `/compact` 后：
+
+1. 程序先把完整原始消息按 JSONL 保存到项目根目录的 `.agents/context/`，
+   文件名为唯一编号，例如 `20261022-153000.jsonl`；
+2. 使用专门的压缩 Prompt 调用 LLM，只允许生成摘要，不传入任何工具定义；
+3. 保留原 System Prompt 与工具定义，用摘要替换历史消息，并在摘要末尾追加归档说明；
+4. 弹出左右两栏浮层，左侧显示压缩前原文，右侧显示压缩后摘要，可分别滚动。
+
+压缩失败（归档写入失败、模型报错、空摘要、用户取消）时会保留原有上下文，可直接重试。
+压缩成功后，模型如需找回摘要中缺失的细节，可以调用 `recallContext` 工具，在指定
+或全部归档中按关键词检索原始消息片段。该工具只做本地全文匹配，不依赖向量数据库。
+
+## 会话、AGENTS.md 与斜杠补全
+
+每个会话保存为 `<project_root>/.agents/sessions/<id>/`：
+
+```text
+session.json   # 元数据 + messages 快照
+events.jsonl   # 追加式事件日志（轮次、工具、压缩、AGENTS.md 注入、恢复等）
+```
+
+`/new` 会先保存当前会话，再创建新的会话编号；`/resume` 打开会话列表，使用 ↑/↓ 选择、
+Enter 恢复、Esc 取消；`/save` 可随时手动保存。每轮对话结束、工具调用、上下文压缩后
+会根据 `[session] auto_save` 自动写入快照。恢复会话时不会再次注入 `AGENTS.md`。
+
+项目根目录存在 `AGENTS.md` 时，它会在会话首次加载时作为额外的 system 消息加入对话历史，
+并记录到会话事件日志中；后续恢复同一会话时直接复用该历史，不会重复注入。
+如需强制重新读取，可执行 `/new` 开启新会话。
+
+输入框以 `/` 开头时会显示斜杠命令补全面板；↑/↓ 切换候选项，Enter/Tab 应用命令，
+Esc 关闭面板。`[agent] max_tool_rounds` 等参数均可在配置文件中调整。
 
 ## core 接口（Web / Desktop 复用入口）
 
@@ -138,6 +196,9 @@ Web 可使用线程池或 async 包装，Desktop 可使用 QThread / 后台线�
 | `AssistantCompleted(round_index, content)` | 某一轮模型输出结束 |
 | `ToolCallStarted(round_index, tool_call_id, name, arguments)` | 开始执行工具 |
 | `ToolCallFinished(round_index, tool_call_id, name, output, is_error)` | 工具执行完成 |
+| `ContextUsageUpdated(used_tokens, window_tokens, ratio, warning, default_window)` | 上下文用量更新 |
+| `CompactionStarted(archive_id)` | 开始压缩并已确定归档编号 |
+| `CompactionFinished(ok, archive_id, summary, original_text, timestamp, error)` | 压缩完成或失败 |
 | `TurnFinished(ok, content, error, cancelled)` | 本轮结束（成功 / 失败 / 取消） |
 
 `round_index` 从 0 开始；模型每发起一次工具调用并继续追问，就会进入下一轮。
@@ -209,6 +270,7 @@ MY_TOOL = Tool(
 | `Runcli` | 以 `shell=False` 执行本地 CLI，返回 stdout、stderr 和退出码 |
 | `loadSkill` | 按需加载 Agent Skill 的 `SKILL.md` 或 Skill 目录内的附件文件 |
 | `createSkill` | 根据 `name` 和完整的 `skillContext` 创建新的 Agent Skill，不覆盖已有 Skill |
+| `recallContext` | 按关键词检索压缩前归档的原始上下文，可选指定归档编号 |
 
 此外，`.mcp.json` 中配置的 MCP 工具会在启动时动态加入工具表，名称与参数以 MCP Server
 返回的 `tools/list` 为准，详见 [MCP 工具](#mcp-工具)。
@@ -286,6 +348,8 @@ description: Extract text and tables from PDF files when the user asks to inspec
 
 启动时读取项目根目录的 `.mcp.json`（与 Agent Skills 使用同一个 `project_root`）。
 文件不存在时直接跳过；JSON、字段或单个 Server 配置有误时只记录问题，不会阻止 xAgent 启动。
+MCP 连接在后台线程中进行，不会阻塞 TUI；右侧栏显示每个 Server 的 `等待 / 连接中 / 已连接 / 失败`
+状态与工具数量，连接完成后工具列表和 Think 上下文会立即刷新。
 
 支持两种传输：
 
@@ -314,7 +378,24 @@ description: Extract text and tables from PDF files when the user asks to inspec
 - `stdio` 的 `cwd` 相对路径按 `.mcp.json` 所在目录解析；`command` 需要通过 `PATH` 找到，
   或写成绝对路径。
 - `disabled: true` 可临时禁用一个 Server。
+- 客户端使用 MCP SDK 2.x 的 `Client(mode="auto")` 协商协议：先探测 modern
+  `server/discover`，不支持时回退 legacy `initialize`。因此可同时连接普通
+  Streamable HTTP Server 与 2026-07-28 无状态 Server。
 - 连接成功后调用 MCP `tools/list`，把工具注册到现有 Function Calling 工具表。
+
+本地宠物医院 MCP 示例：
+
+```json
+"PetHospital": {
+  "type": "streamable_http",
+  "url": "http://127.0.0.1:18080/mcp",
+  "timeout": 60
+}
+```
+
+启动顺序为：先运行 `pethospital.exe`，再启动宠物医院 MCP Server，最后启动 xAgent。
+xAgent 只在启动时发现工具；若宠物 MCP 启动较晚，需要重启 xAgent。`add_pet` 是写操作，
+调用前请确认目标数据库。
 - 工具名优先保持原名；与本地工具或已有 MCP 工具冲突时，使用
   `<server>__<tool>` 前缀，仍冲突则追加 `_2`、`_3`。
 - MCP 调用的文本、`structuredContent`、资源内容和 `isError` 都会转换为 `ToolResult`；
@@ -325,7 +406,10 @@ description: Extract text and tables from PDF files when the user asks to inspec
 
 ## 配置
 
-配置优先级：环境变量 > `config.ini` > 默认值。
+配置优先级：环境变量 > `config.ini` > 默认值。默认读取**启动时工作目录**的 `config.ini`；
+文件不存在时会自动生成完整模板。可用 `XAGENT_CONFIG` 指定其他路径。
+
+常用配置项：
 
 | 配置项 | 环境变量 | 默认值 |
 | --- | --- | --- |
@@ -333,14 +417,23 @@ description: Extract text and tables from PDF files when the user asks to inspec
 | `[llm] model_name` | `XAGENT_MODEL` | `qwen2.5` |
 | `[llm] api_key` | `XAGENT_API_KEY` | 空 |
 | `[llm] temperature` | `XAGENT_TEMPERATURE` | `0.7` |
+| `[llm] context_window` | `XAGENT_CONTEXT_WINDOW` | `0`（自动使用 128k，标注「默认」） |
+| `[llm] connect_timeout / read_timeout` | `XAGENT_LLM_*_TIMEOUT` | `10` / `120` 秒 |
 | `[search] baidu_qianfan_api_key` | `XAGENT_SEARCH_API_KEY` | 空 |
+| `[search] endpoint / top_k / max_*` | `XAGENT_SEARCH_*` | 百度千帆默认接口，8 条结果 |
+| `[web] fetch_timeout / max_markdown_chars` | `XAGENT_WEB_*` | `20` 秒 / `50000` 字符 |
+| `[cli] timeout_seconds / max_stream_chars` | `XAGENT_CLI_*` | `30` 秒 / `10000` 字符 |
+| `[mcp] config_filename / default_timeout / max_output_chars` | `XAGENT_MCP_*` | `.mcp.json` / `60` 秒 / `50000` 字符 |
+| `[context] warning_ratio / archive_dir / max_recall_*` | `XAGENT_CONTEXT_*`、`XAGENT_RECALL_*` | `0.6` / `.agents/context` |
+| `[session] directory / auto_save` | `XAGENT_SESSION_*` | `.agents/sessions` / `true` |
 | `[agent] project_root` | `XAGENT_PROJECT_ROOT` | 启动时工作目录 |
 | `[agent] max_tool_rounds` | `XAGENT_MAX_TOOL_ROUNDS` | `100` |
-| 配置文件路径 | `XAGENT_CONFIG` | `xAgent/config.ini` |
+| 配置文件路径 | `XAGENT_CONFIG` | 启动时工作目录的 `config.ini` |
 
 单轮对话默认最多允许 100 轮工具调用，避免复杂任务在完成前被过早中断。
 将 `max_tool_rounds` 设为 `0` 可以取消限制，Agent 会持续调用工具直到任务完成、
-模型不再请求工具或用户按 Esc 取消。
+模型不再请求工具或用户按 Esc 取消。所有超时、结果数量、截断长度、上下文阈值、
+会话目录和 MCP 输出上限都可以通过上述配置项调整。
 
 ## 与 chat3.py 的对应关系
 

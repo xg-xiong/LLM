@@ -9,12 +9,9 @@ import subprocess
 from typing import Any
 from urllib.parse import urlparse
 
-from .registry import Tool
+from core.config import WebConfig
 
-FETCH_TIMEOUT_SECONDS = 20
-CONNECT_TIMEOUT_SECONDS = 8
-MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024
-MAX_MARKDOWN_CHARS = 50_000
+from .registry import Tool
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -108,17 +105,18 @@ def _extract_markdown(html: str, url: str) -> str:
     return markdown.strip()
 
 
-def _truncate_markdown(markdown: str) -> str:
-    if len(markdown) <= MAX_MARKDOWN_CHARS:
+def _truncate_markdown(markdown: str, limit: int) -> str:
+    if len(markdown) <= limit:
         return markdown
 
-    cut = markdown.rfind("\n", 0, MAX_MARKDOWN_CHARS)
-    if cut < MAX_MARKDOWN_CHARS // 2:
-        cut = MAX_MARKDOWN_CHARS
+    cut = markdown.rfind("\n", 0, limit)
+    if cut < limit // 2:
+        cut = limit
     return markdown[:cut].rstrip() + "\n\n... [正文过长，已截断]"
 
 
-def fetch_web(args: dict[str, Any]) -> str:
+def fetch_web(args: dict[str, Any], config: WebConfig | None = None) -> str:
+    config = config or WebConfig()
     url = _validate_url(args.get("url") if isinstance(args, dict) else None)
 
     curl = shutil.which("curl") or shutil.which("curl.exe")
@@ -140,11 +138,11 @@ def fetch_web(args: dict[str, Any]) -> str:
         "--max-redirs",
         "5",
         "--connect-timeout",
-        str(CONNECT_TIMEOUT_SECONDS),
+        str(config.connect_timeout),
         "--max-time",
-        str(FETCH_TIMEOUT_SECONDS),
+        str(config.fetch_timeout),
         "--max-filesize",
-        str(MAX_DOWNLOAD_BYTES),
+        str(config.max_download_bytes),
         "--user-agent",
         _USER_AGENT,
         "--",
@@ -156,29 +154,40 @@ def fetch_web(args: dict[str, Any]) -> str:
             command,
             capture_output=True,
             check=False,
-            timeout=FETCH_TIMEOUT_SECONDS + 5,
+            timeout=config.fetch_timeout + 5,
         )
     except subprocess.TimeoutExpired as exc:
-        raise ValueError(f"获取网页超时（超过 {FETCH_TIMEOUT_SECONDS} 秒）: {url}") from exc
+        raise ValueError(
+            f"获取网页超时（超过 {config.fetch_timeout:g} 秒）: {url}"
+        ) from exc
     except OSError as exc:
         raise ValueError(f"无法启动 curl: {exc}") from exc
 
     if proc.returncode == 28:
-        raise ValueError(f"获取网页超时（超过 {FETCH_TIMEOUT_SECONDS} 秒）: {url}")
+        raise ValueError(f"获取网页超时（超过 {config.fetch_timeout:g} 秒）: {url}")
     if proc.returncode != 0:
         reason = _decode_output(proc.stderr).strip()
         raise ValueError(f"获取网页失败（curl 退出码 {proc.returncode}）: {reason or url}")
 
     data = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode("utf-8")
-    if len(data) > MAX_DOWNLOAD_BYTES:
-        raise ValueError(f"网页内容过大（超过 {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB）: {url}")
+    if len(data) > config.max_download_bytes:
+        size_mb = config.max_download_bytes / (1024 * 1024)
+        raise ValueError(f"网页内容过大（超过 {size_mb:g} MB）: {url}")
 
     html = _decode_html(data)
-    markdown = _truncate_markdown(_extract_markdown(html, url))
+    markdown = _truncate_markdown(
+        _extract_markdown(html, url),
+        config.max_markdown_chars,
+    )
     return f"URL: {url}\n\n{markdown}"
 
 
-def build_web_tools() -> list[Tool]:
+def build_web_tools(config: WebConfig | None = None) -> list[Tool]:
+    config = config or WebConfig()
+
+    def handler(args: dict[str, Any]) -> str:
+        return fetch_web(args, config)
+
     return [
         Tool(
             name="fetchWeb",
@@ -196,6 +205,6 @@ def build_web_tools() -> list[Tool]:
                 },
                 "required": ["url"],
             },
-            handler=fetch_web,
+            handler=handler,
         )
     ]

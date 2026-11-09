@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.config import MCPConfig
 from core.models import ToolResult
 
 MCP_CONFIG_FILENAME = ".mcp.json"
@@ -36,6 +37,11 @@ except Exception as exc:  # noqa: BLE001 - SDK 缺失时降级为无 MCP 模式
     _MCP_IMPORT_ERROR: Exception | None = exc
 else:
     _MCP_IMPORT_ERROR = None
+
+try:  # MCP 2.x 高层客户端：自动协商 modern / legacy 协议
+    from mcp import Client as MCPClient
+except Exception:  # noqa: BLE001 - 1.x 没有该客户端，继续走 initialize()
+    MCPClient = None  # type: ignore[assignment]
 
 try:
     from mcp.client.stdio import stdio_client
@@ -85,6 +91,16 @@ class MCPToolSpec:
     name: str
     description: str
     parameters: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class MCPServerStatus:
+    """供 UI 展示的单个 MCP Server 连接状态。"""
+
+    name: str
+    state: str = "pending"
+    tool_count: int = 0
+    error: str = ""
 
 
 @dataclass(slots=True)
@@ -232,7 +248,10 @@ async def _list_all_tools(session: Any) -> list[Any]:
     return tools
 
 
-def _format_call_result(result: Any) -> tuple[str, bool]:
+def _format_call_result(
+    result: Any,
+    max_output_chars: int = MAX_OUTPUT_CHARS,
+) -> tuple[str, bool]:
     """把 CallToolResult 转成给 LLM 的文本，并返回是否为工具级错误。"""
     content = _field(result, "content", "content", []) or []
     parts: list[str] = []
@@ -248,9 +267,9 @@ def _format_call_result(result: Any) -> tuple[str, bool]:
     output = "\n\n".join(parts).strip()
     if not output:
         output = "(MCP 工具无返回内容)"
-    if len(output) > MAX_OUTPUT_CHARS:
+    if len(output) > max_output_chars:
         output = (
-            output[:MAX_OUTPUT_CHARS].rstrip()
+            output[:max_output_chars].rstrip()
             + "\n\n... [MCP 工具输出过长，已截断]"
         )
 
@@ -260,9 +279,11 @@ def _format_call_result(result: Any) -> tuple[str, bool]:
 
 def load_mcp_servers(
     project_root: str | Path,
+    config: MCPConfig | None = None,
 ) -> tuple[list[MCPServerConfig], list[str]]:
     """读取 `<project_root>/.mcp.json`，返回有效配置与问题列表。"""
-    path = Path(project_root) / MCP_CONFIG_FILENAME
+    config = config or MCPConfig()
+    path = Path(project_root) / config.config_filename
     if not path.is_file():
         return [], []
 
@@ -299,11 +320,16 @@ def load_mcp_servers(
             continue
 
         try:
-            config = _parse_server_config(name, raw_config, path.parent)
+            server_config = _parse_server_config(
+                name,
+                raw_config,
+                path.parent,
+                default_timeout=config.default_timeout,
+            )
         except ValueError as exc:
             issues.append(f"MCP Server `{name}` 配置无效: {exc}")
             continue
-        configs.append(config)
+        configs.append(server_config)
 
     return configs, issues
 
@@ -312,6 +338,8 @@ def _parse_server_config(
     name: str,
     raw: Mapping[str, Any],
     base_dir: Path,
+    *,
+    default_timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> MCPServerConfig:
     declared = raw.get("type") or raw.get("transport")
     transport = ""
@@ -327,7 +355,7 @@ def _parse_server_config(
     else:
         raise ValueError(f"不支持的 type: {declared}（仅支持 stdio / streamable_http）")
 
-    timeout = _parse_timeout(raw.get("timeout"))
+    timeout = _parse_timeout(raw.get("timeout"), default_timeout)
     if transport == "stdio":
         command = raw.get("command")
         if not isinstance(command, str) or not command.strip():
@@ -388,14 +416,14 @@ def _parse_server_config(
     )
 
 
-def _parse_timeout(raw: Any) -> float:
+def _parse_timeout(raw: Any, default: float = DEFAULT_TIMEOUT_SECONDS) -> float:
     if raw is None:
-        return DEFAULT_TIMEOUT_SECONDS
+        return default
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError("timeout 必须是数字") from exc
-    return value if value > 0 else DEFAULT_TIMEOUT_SECONDS
+    return value if value > 0 else default
 
 
 class MCPManager:
@@ -408,6 +436,8 @@ class MCPManager:
         self,
         configs: list[MCPServerConfig],
         issues: list[str] | None = None,
+        *,
+        max_output_chars: int = MAX_OUTPUT_CHARS,
     ) -> None:
         self._configs = tuple(configs)
         self._config_by_name = {config.name: config for config in configs}
@@ -415,6 +445,11 @@ class MCPManager:
         self._tools: list[MCPToolSpec] = []
         self._bindings: dict[str, MCPToolSpec] = {}
         self._states: dict[str, _SessionState] = {}
+        self._status: dict[str, MCPServerStatus] = {
+            config.name: MCPServerStatus(name=config.name)
+            for config in configs
+        }
+        self._max_output_chars = max(1, int(max_output_chars))
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -422,9 +457,18 @@ class MCPManager:
         self._closed = False
 
     @classmethod
-    def from_project_root(cls, project_root: str | Path) -> MCPManager:
-        configs, issues = load_mcp_servers(project_root)
-        return cls(configs, issues)
+    def from_project_root(
+        cls,
+        project_root: str | Path,
+        config: MCPConfig | None = None,
+    ) -> MCPManager:
+        config = config or MCPConfig()
+        configs, issues = load_mcp_servers(project_root, config)
+        return cls(
+            configs,
+            issues,
+            max_output_chars=config.max_output_chars,
+        )
 
     @property
     def servers(self) -> tuple[MCPServerConfig, ...]:
@@ -442,6 +486,10 @@ class MCPManager:
     def issues(self) -> list[str]:
         return list(self._issues)
 
+    @property
+    def statuses(self) -> tuple[MCPServerStatus, ...]:
+        return tuple(self._status[name] for name in self.server_names)
+
     def bind_tool(self, exposed_name: str, spec: MCPToolSpec) -> None:
         self._bindings[exposed_name] = spec
 
@@ -450,36 +498,72 @@ class MCPManager:
         if not self._configs:
             return
         if _MCP_IMPORT_ERROR is not None:
-            self._issues.append(
+            message = (
                 "未安装 MCP Python SDK，无法连接 MCP Server。"
                 "请执行: python -m pip install mcp"
             )
+            self._issues.append(message)
+            for name in self.server_names:
+                self._status[name] = MCPServerStatus(
+                    name=name,
+                    state="error",
+                    error=message,
+                )
             return
 
         try:
             self._start_loop()
         except Exception as exc:  # noqa: BLE001
-            self._issues.append(f"MCP 客户端初始化失败: {_describe_exception(exc)}")
+            message = f"MCP 客户端初始化失败: {_describe_exception(exc)}"
+            self._issues.append(message)
+            for name in self.server_names:
+                self._status[name] = MCPServerStatus(
+                    name=name,
+                    state="error",
+                    error=message,
+                )
             return
 
         for config in self._configs:
+            self._status[config.name] = MCPServerStatus(
+                name=config.name,
+                state="connecting",
+            )
             try:
                 specs = self._submit(
                     self._connect(config),
                     timeout=config.timeout + 10,
                 )
             except concurrent.futures.TimeoutError:
-                self._issues.append(
+                message = (
                     f"MCP Server `{config.name}` 连接超时"
                     f"（{config.timeout:g} 秒）"
                 )
+                self._issues.append(message)
+                self._status[config.name] = MCPServerStatus(
+                    name=config.name,
+                    state="error",
+                    error=message,
+                )
                 continue
             except Exception as exc:  # noqa: BLE001 - 单个服务器失败不影响其他服务器
-                self._issues.append(
-                    f"MCP Server `{config.name}` 连接失败: {_describe_exception(exc)}"
+                message = (
+                    f"MCP Server `{config.name}` 连接失败: "
+                    f"{_describe_exception(exc)}"
+                )
+                self._issues.append(message)
+                self._status[config.name] = MCPServerStatus(
+                    name=config.name,
+                    state="error",
+                    error=message,
                 )
                 continue
             self._tools.extend(specs)
+            self._status[config.name] = MCPServerStatus(
+                name=config.name,
+                state="connected",
+                tool_count=len(specs),
+            )
 
     def call_tool(
         self,
@@ -519,7 +603,7 @@ class MCPManager:
                 is_error=True,
             )
 
-        output, is_error = _format_call_result(result)
+        output, is_error = _format_call_result(result, self._max_output_chars)
         if is_error:
             output = (
                 f"MCP 工具 `{spec.server}/{spec.name}` 返回错误:\n{output}"
@@ -608,46 +692,10 @@ class MCPManager:
     async def _connect(self, config: MCPServerConfig) -> list[MCPToolSpec]:
         stack = AsyncExitStack()
         try:
-            if config.transport == "stdio":
-                if stdio_client is None or StdioServerParameters is None:
-                    raise RuntimeError(
-                        f"无法加载 MCP stdio 客户端: "
-                        f"{_describe_exception(_STDIO_IMPORT_ERROR or _MCP_IMPORT_ERROR)}"
-                    )
-                params = StdioServerParameters(
-                    command=config.command,
-                    args=list(config.args),
-                    env=dict(config.env) or None,
-                    cwd=str(config.cwd) if config.cwd is not None else None,
-                )
-                # 子进程 stderr 不写进 TUI；连接/启动错误仍会通过异常上报。
-                stdio_kwargs: dict[str, Any] = {}
-                try:
-                    if "errlog" in inspect.signature(stdio_client).parameters:
-                        stdio_kwargs["errlog"] = subprocess.DEVNULL
-                except (TypeError, ValueError):
-                    pass
-                streams = await stack.enter_async_context(
-                    stdio_client(params, **stdio_kwargs)
-                )
+            if MCPClient is not None:
+                session = await self._connect_auto(config, stack)
             else:
-                if streamable_http_client is None:
-                    raise RuntimeError(
-                        f"无法加载 MCP Streamable HTTP 客户端: "
-                        f"{_describe_exception(_HTTP_IMPORT_ERROR)}"
-                    )
-                kwargs = self._http_transport_kwargs(config, stack)
-                streams = await stack.enter_async_context(
-                    streamable_http_client(config.url, **kwargs)
-                )
-
-            read_stream, write_stream = streams[0], streams[1]
-            if ClientSession is None:
-                raise RuntimeError("无法加载 MCP ClientSession")
-            session = await stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
-            await session.initialize()
+                session = await self._connect_legacy(config, stack)
             discovered = await _list_all_tools(session)
 
             specs = []
@@ -683,6 +731,68 @@ class MCPManager:
             ):
                 raise close_error from exc
             raise
+
+    def _make_transport(self, config: MCPServerConfig, stack: AsyncExitStack) -> Any:
+        if config.transport == "stdio":
+            if stdio_client is None or StdioServerParameters is None:
+                raise RuntimeError(
+                    f"无法加载 MCP stdio 客户端: "
+                    f"{_describe_exception(_STDIO_IMPORT_ERROR or _MCP_IMPORT_ERROR)}"
+                )
+            params = StdioServerParameters(
+                command=config.command,
+                args=list(config.args),
+                env=dict(config.env) or None,
+                cwd=str(config.cwd) if config.cwd is not None else None,
+            )
+            # 子进程 stderr 不写进 TUI；连接/启动错误仍会通过异常上报。
+            stdio_kwargs: dict[str, Any] = {}
+            try:
+                if "errlog" in inspect.signature(stdio_client).parameters:
+                    stdio_kwargs["errlog"] = subprocess.DEVNULL
+            except (TypeError, ValueError):
+                pass
+            return stdio_client(params, **stdio_kwargs)
+
+        if streamable_http_client is None:
+            raise RuntimeError(
+                f"无法加载 MCP Streamable HTTP 客户端: "
+                f"{_describe_exception(_HTTP_IMPORT_ERROR)}"
+            )
+        kwargs = self._http_transport_kwargs(config, stack)
+        return streamable_http_client(config.url, **kwargs)
+
+    async def _connect_auto(
+        self,
+        config: MCPServerConfig,
+        stack: AsyncExitStack,
+    ) -> Any:
+        if MCPClient is None:
+            raise RuntimeError("无法加载 MCP Client")
+        transport = self._make_transport(config, stack)
+        client = MCPClient(
+            transport,
+            mode="auto",
+            read_timeout_seconds=config.timeout,
+        )
+        await stack.enter_async_context(client)
+        return client.session
+
+    async def _connect_legacy(
+        self,
+        config: MCPServerConfig,
+        stack: AsyncExitStack,
+    ) -> Any:
+        transport = self._make_transport(config, stack)
+        streams = await stack.enter_async_context(transport)
+        read_stream, write_stream = streams[0], streams[1]
+        if ClientSession is None:
+            raise RuntimeError("无法加载 MCP ClientSession")
+        session = await stack.enter_async_context(
+            ClientSession(read_stream, write_stream)
+        )
+        await session.initialize()
+        return session
 
     def _http_transport_kwargs(
         self,
@@ -795,6 +905,7 @@ __all__ = [
     "MCP_CONFIG_FILENAME",
     "MCPManager",
     "MCPServerConfig",
+    "MCPServerStatus",
     "MCPToolSpec",
     "load_mcp_servers",
     "unique_tool_name",

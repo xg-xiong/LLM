@@ -19,6 +19,15 @@ class ToolResult:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """模型接口返回的 Token 用量。"""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class ChatResult:
     """一次 LLM 请求（可能包含流式文本）的结果。"""
 
@@ -27,6 +36,7 @@ class ChatResult:
     tool_calls: tuple[dict[str, Any], ...] = ()
     error: str | None = None
     cancelled: bool = False
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)

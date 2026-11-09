@@ -46,3 +46,8 @@ desktop.ini
 *.log
 logs/
 config.ini
+
+# ---- xAgent 上下文压缩归档 ----
+.agents/context/
+# xAgent 会话记录
+.agents/sessions/

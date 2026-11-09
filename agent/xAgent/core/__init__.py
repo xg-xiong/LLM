@@ -6,19 +6,34 @@
 """
 from .agent import Agent
 from .cancellation import CancellationToken
-from .config import AppConfig, LLMConfig, SearchConfig
+from .config import (
+    AppConfig,
+    CLIConfig,
+    ContextConfig,
+    LLMConfig,
+    MCPConfig,
+    SearchConfig,
+    SessionConfig,
+    WebConfig,
+)
+from .context import ContextStatus
 from .events import (
     AgentEvent,
     AssistantCompleted,
     AssistantDelta,
+    CompactionFinished,
+    CompactionStarted,
+    ContextUsageUpdated,
     ToolCallFinished,
     ToolCallStarted,
     TurnFinished,
     TurnStarted,
 )
 from .exceptions import AgentBusyError, AgentError
-from .models import ChatResult, ToolResult, TurnResult
+from .mcp import MCPServerStatus
+from .models import ChatResult, TokenUsage, ToolResult, TurnResult
 from .prompts import MAX_TOOL_ROUNDS, SYSTEM_PROMPT
+from .session import SessionInfo, SessionStore
 from .skills import Skill, SkillRegistry
 
 __all__ = [
@@ -31,12 +46,25 @@ __all__ = [
     "AppConfig",
     "AssistantCompleted",
     "AssistantDelta",
+    "CLIConfig",
     "CancellationToken",
     "ChatResult",
+    "CompactionFinished",
+    "CompactionStarted",
+    "ContextConfig",
+    "ContextStatus",
+    "ContextUsageUpdated",
     "LLMConfig",
+    "MCPConfig",
+    "MCPServerStatus",
     "SearchConfig",
+    "SessionConfig",
+    "SessionInfo",
+    "SessionStore",
     "Skill",
     "SkillRegistry",
+    "WebConfig",
+    "TokenUsage",
     "ToolCallFinished",
     "ToolCallStarted",
     "ToolResult",
